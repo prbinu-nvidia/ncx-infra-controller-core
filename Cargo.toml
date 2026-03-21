@@ -178,6 +178,7 @@ oid-registry = "0.8"
 once_cell = "1.19"
 pin-project-lite = "0.2"
 pkcs1 = "0.7.5"
+p256 = { version = "0.13.2", features = ["pem"] }
 prettyplease = "0.2.30"
 prettytable-rs = { default-features = false, version = "0.10" }
 procfs = "0.17"

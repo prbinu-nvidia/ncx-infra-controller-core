@@ -713,6 +713,9 @@ service Forge {
   rpc GetTokenDelegation(GetTokenDelegationRequest) returns (TokenDelegationResponse);
   rpc SetTokenDelegation(TokenDelegationRequest) returns (TokenDelegationResponse);
   rpc DeleteTokenDelegation(GetTokenDelegationRequest) returns (google.protobuf.Empty);
+  // Public discovery: JWKS and OpenID provider metadata (intended for unauthenticated fetch via REST gateway).
+  rpc GetJWKS(JwksRequest) returns (Jwks);
+  rpc GetOpenIDConfiguration(OpenIdConfigRequest) returns (OpenIdConfiguration);
 
   // ScoutStream establishes a bidirectional streaming connection between
   // scout agents and carbide-api. The initial use-case for this is for
@@ -949,6 +952,43 @@ message TokenDelegation {
 message TokenDelegationRequest {
   string organization_id = 1;
   TokenDelegation config = 2;
+}
+
+// JSON Web Key (JWKS member). RSA fields (n, e) are empty for EC keys.
+message Jwk {
+  string kty = 1;
+  string use = 2;
+  string crv = 3;
+  string kid = 4;
+  string x = 5;
+  string y = 6;
+  string n = 7;
+  string e = 8;
+  string alg = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp expires_at = 11;
+}
+
+message Jwks {
+  repeated Jwk keys = 1;
+  uint32 version = 2;
+}
+
+message OpenIdConfiguration {
+  string issuer = 1;
+  string jwks_uri = 2;
+  repeated string response_types_supported = 3;
+  repeated string subject_types_supported = 4;
+  repeated string id_token_signing_alg_values_supported = 5;
+  uint32 version = 6;
+}
+
+message JwksRequest {
+  string organization_id = 1;
+}
+
+message OpenIdConfigRequest {
+  string organization_id = 1;
 }
 
 // Determines machine ingestion state in relation to the power on gate
