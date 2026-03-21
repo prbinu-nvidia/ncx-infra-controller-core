@@ -15,15 +15,68 @@
  * limitations under the License.
  */
 
-//! gRPC handler for machine identity (JWT-SVID SignMachineIdentity).
-//! Business logic lives in the `crate::machine_identity` module.
+//! gRPC handlers for machine identity: JWT-SVID signing, JWKS, and OpenID discovery.
+//! PEM/JWK encoding helpers live in `crate::machine_identity`; persisted config in `tenant_identity_config`.
 
-use ::rpc::forge::{self as rpc, MachineIdentityResponse};
+use ::rpc::forge::{
+    self as rpc, Jwks, JwksRequest, MachineIdentityResponse, OpenIdConfigRequest,
+    OpenIdConfiguration,
+};
+use db::{WithTransaction, tenant, tenant_identity_config};
+use model::tenant::{InvalidTenantOrg, TenantIdentityConfig, TenantOrganizationId};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::auth::AuthContext;
+
+/// Shared gate for APIs that require site `[machine_identity].enabled` (identity admin + discovery).
+pub(crate) fn require_machine_identity_site_enabled(api: &Api) -> Result<(), Status> {
+    if !api.runtime_config.machine_identity.enabled {
+        return Err(CarbideError::InvalidArgument(
+            "Machine identity must be enabled in site config".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn jwks_uri_for_issuer(issuer: &str) -> String {
+    let base = issuer.trim_end_matches('/');
+    format!("{base}/.well-known/jwks.json")
+}
+
+async fn load_enabled_identity_for_well_known(
+    api: &Api,
+    org_id: &TenantOrganizationId,
+) -> Result<(TenantIdentityConfig, u32), Status> {
+    let org_id_str = org_id.as_str().to_string();
+    let (cfg, tenant) = api
+        .database_connection
+        .with_txn(|txn| {
+            let org_id = org_id.clone();
+            Box::pin(async move {
+                let cfg = tenant_identity_config::find(&org_id, txn).await?;
+                let tenant = tenant::find(org_id.as_str(), false, txn).await?;
+                Ok::<_, db::DatabaseError>((cfg, tenant))
+            })
+        })
+        .await??;
+    let cfg = match cfg {
+        Some(c) if c.enabled => c,
+        _ => {
+            return Err(CarbideError::NotFoundError {
+                kind: "tenant_identity_config",
+                id: org_id_str,
+            }
+            .into());
+        }
+    };
+    let version = tenant
+        .map(|t| u32::try_from(t.version.version_nr()).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    Ok((cfg, version))
+}
 
 /// Handles the SignMachineIdentity gRPC call: validates the request, extracts
 /// machine identity from the client certificate, and returns a JWT-SVID response.
@@ -79,4 +132,86 @@ pub(crate) async fn sign_machine_identity(
     };
 
     Ok(Response::new(response))
+}
+
+/// Public JWKS for JWT verification (intended for unauthenticated callers via REST gateway).
+pub(crate) async fn get_jwks(
+    api: &Api,
+    request: Request<JwksRequest>,
+) -> Result<Response<Jwks>, Status> {
+    log_request_data(&request);
+    require_machine_identity_site_enabled(api)?;
+
+    let req = request.into_inner();
+    let org_raw = req.organization_id.trim();
+    if org_raw.is_empty() {
+        return Err(
+            CarbideError::InvalidArgument("organization_id is required".to_string()).into(),
+        );
+    }
+    let org_id: TenantOrganizationId = org_raw
+        .parse()
+        .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
+
+    let (cfg, version) = load_enabled_identity_for_well_known(api, &org_id).await?;
+
+    if cfg.signing_key_public.trim().is_empty() || cfg.key_id.trim().is_empty() {
+        return Err(CarbideError::NotFoundError {
+            kind: "tenant_identity_config",
+            id: org_id.as_str().to_string(),
+        }
+        .into());
+    }
+
+    let jwk = crate::machine_identity::public_pem_to_jwk(
+        &cfg.signing_key_public,
+        &cfg.key_id,
+        &cfg.algorithm,
+        cfg.updated_at,
+    )
+    .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
+
+    Ok(Response::new(Jwks {
+        keys: vec![jwk],
+        version,
+    }))
+}
+
+/// OpenID Provider metadata (issuer, jwks_uri, algorithms).
+pub(crate) async fn get_open_id_configuration(
+    api: &Api,
+    request: Request<OpenIdConfigRequest>,
+) -> Result<Response<OpenIdConfiguration>, Status> {
+    log_request_data(&request);
+    require_machine_identity_site_enabled(api)?;
+
+    let req = request.into_inner();
+    let org_raw = req.organization_id.trim();
+    if org_raw.is_empty() {
+        return Err(
+            CarbideError::InvalidArgument("organization_id is required".to_string()).into(),
+        );
+    }
+    let org_id: TenantOrganizationId = org_raw
+        .parse()
+        .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
+
+    let (cfg, version) = load_enabled_identity_for_well_known(api, &org_id).await?;
+
+    if cfg.issuer.trim().is_empty() {
+        return Err(CarbideError::NotFoundError {
+            kind: "tenant_identity_config",
+            id: org_id.as_str().to_string(),
+        }
+        .into());
+    }
+
+    Ok(Response::new(OpenIdConfiguration {
+        issuer: cfg.issuer.clone(),
+        jwks_uri: jwks_uri_for_issuer(&cfg.issuer),
+        response_types_supported: vec!["token".into()],
+        subject_types_supported: vec!["public".into()],
+        id_token_signing_alg_values_supported: vec![cfg.algorithm.clone()],
+        version,
+    }))
 }

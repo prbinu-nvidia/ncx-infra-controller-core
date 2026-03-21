@@ -19,9 +19,19 @@
 //!
 //! This module handles signing JWT-SVID tokens for machine identity verification.
 #![allow(dead_code)] // Signer, Es256Signer, SignOptions used from tests and from handler once key loading is implemented
-use std::collections::BTreeMap;
 
+use std::collections::BTreeMap;
+use std::fmt;
+
+use ::rpc::Timestamp;
+use ::rpc::forge::Jwk;
+use base64::Engine;
+use chrono::{DateTime, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
+use model::tenant::TENANT_IDENTITY_SIGNING_JWT_ALG;
+use p256::PublicKey;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::pkcs8::DecodePublicKey;
 use serde_json::Value;
 
 /// Error type for JWT-SVID signing.
@@ -99,8 +109,66 @@ pub fn sign(payload: &Value, key: &[u8]) -> Result<String, SignError> {
     signer.sign(payload, &SignOptions::default())
 }
 
+/// Failure converting a tenant PEM public key into a protobuf `Jwk`.
+#[derive(Debug)]
+pub struct JwkBuildError(pub String);
+
+impl fmt::Display for JwkBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for JwkBuildError {}
+
+/// RFC 7517 `use` for public keys used to verify JWT signatures (e.g. SPIFFE JWT-SVID with ES256).
+const JWKS_KEY_USE: &str = "sig";
+
+/// Maps `tenant_identity_config.signing_key_public` (SPKI PEM) into a single JWKS key.
+pub fn public_pem_to_jwk(
+    public_key_pem: &str,
+    kid: &str,
+    algorithm: &str,
+    material_updated_at: DateTime<Utc>,
+) -> Result<Jwk, JwkBuildError> {
+    if algorithm != TENANT_IDENTITY_SIGNING_JWT_ALG {
+        return Err(JwkBuildError(format!(
+            "JWKS is only implemented for {TENANT_IDENTITY_SIGNING_JWT_ALG} (got {algorithm:?})"
+        )));
+    }
+
+    let pk = PublicKey::from_public_key_pem(public_key_pem.trim())
+        .map_err(|e| JwkBuildError(format!("failed to parse signing public key PEM: {e}")))?;
+    let encoded = pk.to_encoded_point(false);
+    let x = encoded
+        .x()
+        .ok_or_else(|| JwkBuildError("EC public key missing x coordinate".into()))?;
+    let y = encoded.y().ok_or_else(|| {
+        JwkBuildError("EC public key missing y coordinate — expected uncompressed SEC1".into())
+    })?;
+
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    Ok(Jwk {
+        kty: "EC".into(),
+        r#use: JWKS_KEY_USE.into(),
+        crv: "P-256".into(),
+        kid: kid.to_string(),
+        x: b64.encode(x),
+        y: b64.encode(y),
+        n: String::new(),
+        e: String::new(),
+        alg: algorithm.to_string(),
+        created_at: Some(Timestamp::from(material_updated_at)),
+        expires_at: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use p256::SecretKey;
+    use p256::pkcs8::{DecodePrivateKey, EncodePublicKey};
+
     use super::*;
 
     /// Returns an EC P-256 private key in PKCS#8 PEM format (standard encoding), generated at test time.
@@ -171,5 +239,29 @@ mod tests {
             .expect("sign");
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn public_pem_to_jwk_es256() {
+        let key_pair = rcgen::KeyPair::generate().expect("generate test key pair");
+        let private_pem = key_pair.serialize_pem();
+        let sk = SecretKey::from_pkcs8_pem(&private_pem).expect("parse PKCS#8 private PEM");
+        let pk = sk.public_key();
+        let pem = pk
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .expect("public key PEM");
+        let jwk = public_pem_to_jwk(
+            &pem,
+            "test-kid",
+            TENANT_IDENTITY_SIGNING_JWT_ALG,
+            Utc::now(),
+        )
+        .expect("jwk");
+        assert_eq!(jwk.kty, "EC");
+        assert_eq!(jwk.r#use, JWKS_KEY_USE);
+        assert_eq!(jwk.crv, "P-256");
+        assert_eq!(jwk.kid, "test-kid");
+        assert_eq!(jwk.alg, TENANT_IDENTITY_SIGNING_JWT_ALG);
+        assert!(!jwk.x.is_empty() && !jwk.y.is_empty());
     }
 }
