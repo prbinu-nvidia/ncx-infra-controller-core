@@ -18,6 +18,7 @@
 //! gRPC handlers for tenant_identity_config table.
 //! Identity config: issuer, audiences, TTL, signing key (Get/Set/Delete).
 //! Token delegation: token exchange config for external IdP (Get/Set/Delete).
+//! JWKS and OpenID discovery RPCs live in [`machine_identity`](super::machine_identity).
 
 use ::rpc::Timestamp;
 use ::rpc::forge::{
@@ -36,6 +37,7 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
+use crate::handlers::machine_identity::require_machine_identity_site_enabled;
 
 async fn machine_identity_encryption_secret_b64(
     api: &Api,
@@ -108,12 +110,7 @@ pub(crate) async fn get_identity_configuration(
 ) -> Result<Response<IdentityConfigResponse>, Status> {
     log_request_data(&request);
 
-    if !api.runtime_config.machine_identity.enabled {
-        return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config".to_string(),
-        )
-        .into());
-    }
+    require_machine_identity_site_enabled(api)?;
 
     let req = request.into_inner();
     let org_id = req.organization_id.trim();
@@ -167,12 +164,7 @@ pub(crate) async fn delete_identity_configuration(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
 
-    if !api.runtime_config.machine_identity.enabled {
-        return Err(CarbideError::InvalidArgument(
-            "Machine identity must be enabled in site config".to_string(),
-        )
-        .into());
-    }
+    require_machine_identity_site_enabled(api)?;
 
     let req = request.into_inner();
     let org_id = req.organization_id.trim();
