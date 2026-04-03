@@ -913,7 +913,7 @@ message IdentityConfig {
   string default_audience = 3;
   repeated string allowed_audiences = 4;
   uint32 token_ttl_sec = 5;
-  // When unset or empty, defaults to spiffe://<trust-domain-from-issuer>/
+  // When unset or empty, defaults to spiffe://<trust-domain-from-issuer>
   optional string subject_prefix = 6;
   bool rotate_key = 7;
 }

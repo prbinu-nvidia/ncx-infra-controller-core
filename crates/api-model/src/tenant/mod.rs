@@ -547,7 +547,7 @@ pub struct IdentityConfigValidationError(pub String);
 impl IdentityConfig {
     /// Validates gRPC `IdentityConfig` and converts to `IdentityConfig`, including SPIFFE
     /// `subject_prefix` resolution against `issuer` (optional proto field defaults to
-    /// `spiffe://<trust-domain-from-issuer>/`).
+    /// `spiffe://<trust-domain-from-issuer>`).
     pub fn try_from_proto(
         value: rpc_forge::IdentityConfig,
         bounds: &IdentityConfigValidationBounds,
@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(config.default_audience, "api");
         assert_eq!(config.allowed_audiences, vec!["api", "other"]);
         assert_eq!(config.token_ttl_sec, 3600);
-        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com/");
+        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com");
         assert!(config.enabled);
         assert!(!config.rotate_key);
         assert_eq!(config.algorithm, "ES256");
@@ -1070,7 +1070,7 @@ mod tests {
         };
         let config = IdentityConfig::try_from_proto(proto, &bounds).unwrap();
         assert_eq!(config.issuer, "https://issuer.example.com/wl");
-        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com/");
+        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com");
     }
 
     #[test]
@@ -1184,7 +1184,7 @@ mod tests {
             trust_domain_allowlist: vec![],
         };
         let config = IdentityConfig::try_from_proto(proto, &bounds).unwrap();
-        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com/");
+        assert_eq!(config.subject_prefix, "spiffe://issuer.example.com");
     }
 
     #[test]
@@ -1339,7 +1339,7 @@ mod tests {
             trust_domain_allowlist: vec!["**.login.example.com".to_string()],
         };
         let config = IdentityConfig::try_from_proto(proto, &bounds).unwrap();
-        assert_eq!(config.subject_prefix, "spiffe://auth.login.example.com/");
+        assert_eq!(config.subject_prefix, "spiffe://auth.login.example.com");
     }
 
     #[test]
@@ -1371,7 +1371,7 @@ mod tests {
         };
         let config = IdentityConfig::try_from_proto(proto, &bounds).unwrap();
         assert_eq!(config.issuer, "https://idp.other.example/oidc");
-        assert_eq!(config.subject_prefix, "spiffe://idp.other.example/");
+        assert_eq!(config.subject_prefix, "spiffe://idp.other.example");
     }
 
     #[test]

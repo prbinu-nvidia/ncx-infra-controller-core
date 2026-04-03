@@ -174,7 +174,7 @@ fn normalize_allowlist_token(s: &str) -> String {
 fn trust_domain_matches_single_star_suffix(td: &str, suffix: &str) -> bool {
     let tail = format!(".{suffix}");
     td.strip_suffix(&tail)
-        .map_or(false, |left| !left.is_empty() && !left.contains('.'))
+        .is_some_and(|left| !left.is_empty() && !left.contains('.'))
 }
 
 /// `**.suffix`: `suffix` itself or any subdomain (`a.b.suffix`).
@@ -199,11 +199,9 @@ fn hostname_matches_allowlist(
     }
     for raw in allowlist {
         let p = normalize_allowlist_token(raw);
-        let matches = if p.starts_with("**.") {
-            let suffix = &p[3..];
+        let matches = if let Some(suffix) = p.strip_prefix("**.") {
             trust_domain_matches_double_star_suffix(&td, suffix)
-        } else if p.starts_with("*.") {
-            let suffix = &p[2..];
+        } else if let Some(suffix) = p.strip_prefix("*.") {
             trust_domain_matches_single_star_suffix(&td, suffix)
         } else {
             td == p
@@ -261,8 +259,7 @@ fn validate_hostname_allowlist_patterns(
         if p == "*" || p == "**" {
             return Err(format!("{list_field}: bare `*` is not allowed ({raw:?})"));
         }
-        if p.starts_with("**.") {
-            let suffix = &p[3..];
+        if let Some(suffix) = p.strip_prefix("**.") {
             if suffix.is_empty() {
                 return Err(format!("{list_field}: invalid pattern {raw:?}"));
             }
@@ -271,8 +268,7 @@ fn validate_hostname_allowlist_patterns(
                     "{list_field}: `*` not allowed inside suffix ({raw:?})"
                 ));
             }
-        } else if p.starts_with("*.") {
-            let suffix = &p[2..];
+        } else if let Some(suffix) = p.strip_prefix("*.") {
             if suffix.is_empty() {
                 return Err(format!("{list_field}: invalid pattern {raw:?}"));
             }
@@ -357,7 +353,7 @@ fn validate_subject_prefix_url(u: &Url) -> Result<(), String> {
 }
 
 fn default_subject_prefix(expected_td: &str) -> String {
-    format!("spiffe://{expected_td}/")
+    format!("spiffe://{expected_td}")
 }
 
 fn validate_path_segments(path_raw: &str) -> Result<Vec<&str>, String> {
@@ -366,7 +362,7 @@ fn validate_path_segments(path_raw: &str) -> Result<Vec<&str>, String> {
     }
     if path_raw.ends_with('/') {
         return Err(
-            "subject_prefix path must not end with '/' (use spiffe://<td>/ for root only)".into(),
+            "subject_prefix path must not end with '/' (use spiffe://<td> for root only)".into(),
         );
     }
     let mut out = Vec::new();
@@ -428,7 +424,7 @@ fn validate_and_canonicalize_subject_prefix(
     }
 }
 
-/// Resolves optional proto `subject_prefix`: default `spiffe://<expected_td>/` or validated user value.
+/// Resolves optional proto `subject_prefix`: default `spiffe://<expected_td>` or validated user value.
 pub(super) fn resolve_subject_prefix(
     expected_td: &str,
     proto_subject_prefix: Option<&str>,
@@ -512,7 +508,7 @@ mod tests {
     fn resolve_identity_defaults_prefix() {
         assert_eq!(
             resolve_identity("https://my.idp.example", None).unwrap(),
-            "spiffe://my.idp.example/"
+            "spiffe://my.idp.example"
         );
     }
 
@@ -520,7 +516,7 @@ mod tests {
     fn resolve_identity_spiffe_form_issuer() {
         assert_eq!(
             resolve_identity("spiffe://my.idp.example/ns/x", None).unwrap(),
-            "spiffe://my.idp.example/"
+            "spiffe://my.idp.example"
         );
     }
 
@@ -533,8 +529,8 @@ mod tests {
 
     #[test]
     fn wrong_td_rejected() {
-        let err = resolve_identity("https://issuer.example", Some("spiffe://other.example/"))
-            .unwrap_err();
+        let err =
+            resolve_identity("https://issuer.example", Some("spiffe://other.example")).unwrap_err();
         assert!(err.contains("does not match"));
     }
 
@@ -635,7 +631,7 @@ mod tests {
 
     #[test]
     fn subject_prefix_too_long_rejected() {
-        let base = "spiffe://issuer.example/";
+        let base = "spiffe://issuer.example";
         let pad_len = MAX_SUBJECT_PREFIX_BYTES.saturating_sub(base.len()) + 1;
         let prefix = format!("{base}{}", "x".repeat(pad_len));
         assert!(prefix.len() > MAX_SUBJECT_PREFIX_BYTES);
