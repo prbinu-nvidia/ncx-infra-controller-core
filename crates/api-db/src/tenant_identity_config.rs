@@ -302,7 +302,7 @@ mod tests {
             default_audience: "api".to_string(),
             allowed_audiences: vec!["api".to_string()],
             token_ttl_sec: 3600,
-            subject_prefix: "spiffe://issuer.example.com/".to_string(),
+            subject_prefix: "spiffe://issuer.example.com".to_string(),
             enabled: true,
             rotate_key: false,
             algorithm: "ES256".to_string(),
