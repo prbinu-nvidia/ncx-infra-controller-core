@@ -22,7 +22,7 @@ use db::db_read::DbReader;
 use db::{
     ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack, switch as db_switch,
 };
-use forge_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use forge_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialReader, Credentials};
 use librms::protos::rack_manager as rms;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
@@ -36,7 +36,6 @@ use model::rack_type::{
     RackHardwareClass, RackHardwareType, RackProfile, RackProfileConfig,
 };
 use model::switch::{NewSwitch, SwitchConfig};
-use serde_json::json;
 use tonic::Request;
 
 use crate::state_controller::db_write_batch::DbWriteBatch;
@@ -157,58 +156,6 @@ pub(crate) fn config_with_rack_profiles() -> crate::cfg::file::CarbideConfig {
         .collect(),
     };
     config
-}
-
-fn default_lookup_table_json() -> serde_json::Value {
-    json!({
-        "devices": {
-            "Compute Node": {
-                "HMC_prod": {
-                    "filename": "hmc-prod.bin",
-                    "target": "/redfish/v1/Chassis/HGX_Chassis_0",
-                    "component": "HMC",
-                    "bundle": "bundle-hmc",
-                    "firmware_type": "prod",
-                    "version": "1.0.0"
-                },
-                "BMC_prod": {
-                    "filename": "bmc-prod.bin",
-                    "target": "FW_BMC_0",
-                    "component": "BMC",
-                    "bundle": "bundle-bmc",
-                    "firmware_type": "prod",
-                    "version": "1.0.0"
-                }
-            }
-        }
-    })
-}
-
-async fn insert_default_rack_firmware(
-    pool: &sqlx::PgPool,
-    firmware_id: &str,
-    rack_hardware_type: RackHardwareType,
-    available: bool,
-) {
-    let mut txn = pool.begin().await.unwrap();
-    db::rack_firmware::create(
-        &mut txn,
-        firmware_id,
-        rack_hardware_type,
-        json!({ "Id": firmware_id }),
-        Some(default_lookup_table_json()),
-    )
-    .await
-    .unwrap();
-    if available {
-        db::rack_firmware::set_available(&mut txn, firmware_id, true)
-            .await
-            .unwrap();
-    }
-    db::rack_firmware::set_default(&mut txn, firmware_id)
-        .await
-        .unwrap();
-    txn.commit().await.unwrap();
 }
 
 async fn create_single_compute_rack(
@@ -396,36 +343,6 @@ async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_profil
     db_expected_rack::create(&mut txn, &er).await.unwrap();
 }
 
-async fn create_default_nvos_rack_firmware(pool: &sqlx::PgPool, firmware_id: &str) {
-    let mut txn = pool.acquire().await.unwrap();
-    sqlx::query(
-        "INSERT INTO rack_firmware \
-         (id, rack_hardware_type, config, parsed_components, available, is_default) \
-         VALUES ($1, $2, $3::jsonb, $4::jsonb, true, true)",
-    )
-    .bind(firmware_id)
-    .bind(RackHardwareType::any())
-    .bind(sqlx::types::Json(json!({ "Id": firmware_id })))
-    .bind(sqlx::types::Json(json!({
-        "devices": {},
-        "switch_system_images": {
-            "Switch Tray": {
-                "NVOS_prod": {
-                    "component": "NVOS",
-                    "package_name": "GB200NVL72_NVOS",
-                    "version": "25.02.2553",
-                    "image_filename": "nvos-amd64-25.02.2553.bin",
-                    "location_type": "HTTPS",
-                    "firmware_type": "prod"
-                }
-            }
-        }
-    })))
-    .execute(txn.as_mut())
-    .await
-    .unwrap();
-}
-
 pub(crate) fn new_machine_id(seed: u8) -> MachineId {
     let mut hash = [0u8; 32];
     hash[0] = seed;
@@ -455,7 +372,8 @@ async fn test_on_demand_rack_maintenance_schedules_nvos_only_scope(
                     activity: Some(
                         rpc::forge::maintenance_activity_config::Activity::NvosUpdate(
                             rpc::forge::NvosUpdateActivity {
-                                rack_firmware_id: "fw-nvos".to_string(),
+                                config_json: r#"{"Id":"fw-nvos"}"#.to_string(),
+                                access_token: Some("token".to_string()),
                             },
                         ),
                     ),
@@ -475,8 +393,8 @@ async fn test_on_demand_rack_maintenance_schedules_nvos_only_scope(
     assert!(matches!(
         &scope.activities[0],
         MaintenanceActivity::NvosUpdate {
-            rack_firmware_id: Some(id)
-        } if id == "fw-nvos"
+            config_json,
+        } if config_json == r#"{"Id":"fw-nvos"}"#
     ));
 
     Ok(())
@@ -544,8 +462,10 @@ async fn test_on_demand_rack_maintenance_schedules_firmware_and_nvos_scope(
                         activity: Some(
                             rpc::forge::maintenance_activity_config::Activity::FirmwareUpgrade(
                                 rpc::forge::FirmwareUpgradeActivity {
-                                    firmware_version: "fw-mixed".to_string(),
+                                    firmware_version: r#"{"Id":"fw-mixed"}"#.to_string(),
                                     components: vec!["BMC".to_string()],
+                                    access_token: Some("token".to_string()),
+                                    force_update: false,
                                 },
                             ),
                         ),
@@ -554,7 +474,8 @@ async fn test_on_demand_rack_maintenance_schedules_firmware_and_nvos_scope(
                         activity: Some(
                             rpc::forge::maintenance_activity_config::Activity::NvosUpdate(
                                 rpc::forge::NvosUpdateActivity {
-                                    rack_firmware_id: "fw-mixed".to_string(),
+                                    config_json: r#"{"Id":"fw-mixed"}"#.to_string(),
+                                    access_token: Some("token".to_string()),
                                 },
                             ),
                         ),
@@ -577,14 +498,69 @@ async fn test_on_demand_rack_maintenance_schedules_firmware_and_nvos_scope(
         MaintenanceActivity::FirmwareUpgrade {
             firmware_version: Some(id),
             components,
-        } if id == "fw-mixed" && components == &vec!["BMC".to_string()]
+            ..
+        } if id == r#"{"Id":"fw-mixed"}"# && components == &vec!["BMC".to_string()]
     ));
     assert!(matches!(
         &scope.activities[1],
         MaintenanceActivity::NvosUpdate {
-            rack_firmware_id: Some(id)
-        } if id == "fw-mixed"
+            config_json,
+        } if config_json == r#"{"Id":"fw-mixed"}"#
     ));
+    let token_credentials = env
+        .test_credential_manager
+        .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
+            rack_id: rack_id.clone(),
+        })
+        .await
+        .expect("credential lookup should succeed")
+        .expect("access token should be stored as a credential");
+    assert_eq!(
+        token_credentials,
+        Credentials::UsernamePassword {
+            username: "access_token".to_string(),
+            password: "token".to_string(),
+        }
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_on_demand_rack_maintenance_rejects_firmware_without_access_token(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+
+    let err = crate::handlers::rack::on_demand_rack_maintenance(
+        env.api.as_ref(),
+        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
+            rack_id: Some(rack_id.clone()),
+            scope: Some(rpc::forge::RackMaintenanceScope {
+                machine_ids: vec![],
+                switch_ids: vec![switch_id.to_string()],
+                power_shelf_ids: vec![],
+                activities: vec![rpc::forge::MaintenanceActivityConfig {
+                    activity: Some(
+                        rpc::forge::maintenance_activity_config::Activity::FirmwareUpgrade(
+                            rpc::forge::FirmwareUpgradeActivity {
+                                firmware_version: r#"{"Id":"fw-mixed"}"#.to_string(),
+                                components: vec!["BMC".to_string()],
+                                access_token: None,
+                                force_update: false,
+                            },
+                        ),
+                    ),
+                }],
+            }),
+        }),
+    )
+    .await
+    .expect_err("firmware-upgrade should require access_token");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("access_token"));
 
     Ok(())
 }
@@ -1258,12 +1234,11 @@ async fn test_ready_with_no_labels_stays_ready(
     Ok(())
 }
 
-/// test_firmware_upgrade_start_without_default_advances_to_nvos_update
-/// verifies that maintenance skips firmware flashing when no default firmware
-/// exists for the rack hardware type and continues through NVOS update before
-/// ConfigureNmxCluster.
+/// test_firmware_upgrade_start_skips_without_json verifies that
+/// Maintenance::FirmwareUpgrade(Start) skips firmware flashing when no
+/// firmware object JSON source is configured for rack maintenance.
 #[crate::sqlx_test]
-async fn test_firmware_upgrade_start_without_default_advances_to_nvos_update(
+async fn test_firmware_upgrade_start_skips_without_json(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -1275,6 +1250,7 @@ async fn test_firmware_upgrade_start_without_default_advances_to_nvos_update(
     )
     .await;
     let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
+
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
@@ -1305,14 +1281,12 @@ async fn test_firmware_upgrade_start_without_default_advances_to_nvos_update(
                 matches!(
                     next_state,
                     RackState::Maintenance {
-                        maintenance_state: RackMaintenanceState::NVOSUpdate {
-                            nvos_update: NvosUpdateState::Start {
-                                rack_firmware_id: None,
-                            },
+                        maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                            configure_nmx_cluster: _,
                         },
                     }
                 ),
-                "FirmwareUpgrade(Start) should skip firmware and advance to NVOSUpdate, got {:?}",
+                "FirmwareUpgrade(Start) should skip firmware without JSON and advance to the next requested activity, got {:?}",
                 next_state
             );
         }
@@ -1322,7 +1296,12 @@ async fn test_firmware_upgrade_start_without_default_advances_to_nvos_update(
         ),
     }
 
-    assert!(env.rms_sim.submitted_firmware_requests().await.is_empty());
+    let requests = env.rms_sim.submitted_apply_firmware_object_requests().await;
+    assert!(
+        requests.is_empty(),
+        "firmware apply should not be submitted without a firmware object JSON source"
+    );
+
     let machine = db::machine::find_one(
         &pool,
         &host.host_snapshot.id,
@@ -1335,12 +1314,8 @@ async fn test_firmware_upgrade_start_without_default_advances_to_nvos_update(
     Ok(())
 }
 
-/// test_firmware_upgrade_start_with_unavailable_default_advances_to_nvos_update
-/// verifies that maintenance skips firmware flashing when a default firmware
-/// exists for the hardware type but is not yet available, then continues
-/// through NVOS update before ConfigureNmxCluster.
 #[crate::sqlx_test]
-async fn test_firmware_upgrade_start_with_unavailable_default_advances_to_nvos_update(
+async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -1351,127 +1326,52 @@ async fn test_firmware_upgrade_start_with_unavailable_default_advances_to_nvos_u
         },
     )
     .await;
-    let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
-    insert_default_rack_firmware(
-        &pool,
-        "fw-default-unavailable",
-        RackHardwareType::any(),
-        false,
-    )
-    .await;
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+    let switch_id_string = switch_id.to_string();
 
-    let handler_instance = RackStateHandler::default();
-    let mut services = env.rack_state_handler_services();
-    let mut metrics = RackMetrics::default();
-    let mut db_writes = DbWriteBatch::default();
-    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
-        services: &mut services,
-        metrics: &mut metrics,
-        pending_db_writes: &mut db_writes,
-    };
-
-    let fw_state = RackState::Maintenance {
-        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
-            rack_firmware_upgrade: FirmwareUpgradeState::Start,
-        },
-    };
-    let mut outcome = handler_instance
-        .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
-        .await?;
-    if let Some(txn) = outcome.take_transaction() {
-        txn.commit().await?;
-    }
-
-    match outcome {
-        StateHandlerOutcome::Transition { next_state, .. } => {
-            assert!(
-                matches!(
-                    next_state,
-                    RackState::Maintenance {
-                        maintenance_state: RackMaintenanceState::NVOSUpdate {
-                            nvos_update: NvosUpdateState::Start {
-                                rack_firmware_id: None,
+    crate::handlers::rack::on_demand_rack_maintenance(
+        env.api.as_ref(),
+        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
+            rack_id: Some(rack_id.clone()),
+            scope: Some(rpc::forge::RackMaintenanceScope {
+                machine_ids: vec![],
+                switch_ids: vec![switch_id_string.clone()],
+                power_shelf_ids: vec![],
+                activities: vec![rpc::forge::MaintenanceActivityConfig {
+                    activity: Some(
+                        rpc::forge::maintenance_activity_config::Activity::FirmwareUpgrade(
+                            rpc::forge::FirmwareUpgradeActivity {
+                                firmware_version: r#"{"Id":"fw-json"}"#.to_string(),
+                                components: vec!["BMC".to_string()],
+                                access_token: Some("token".to_string()),
+                                force_update: true,
                             },
-                        },
-                    }
-                ),
-                "FirmwareUpgrade(Start) should skip unavailable firmware and advance to NVOSUpdate, got {:?}",
-                next_state
-            );
-        }
-        other => panic!(
-            "Expected Transition, got {:?}",
-            std::mem::discriminant(&other)
-        ),
-    }
-
-    assert!(env.rms_sim.submitted_firmware_requests().await.is_empty());
-    let machine = db::machine::find_one(
-        &pool,
-        &host.host_snapshot.id,
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?
-    .expect("machine should exist");
-    assert!(machine.host_reprovision_requested.is_none());
-
-    Ok(())
-}
-
-/// test_firmware_upgrade_start_transitions_to_wait_for_complete verifies that
-/// Maintenance::FirmwareUpgrade(Start) transitions to WaitForComplete.
-#[crate::sqlx_test]
-async fn test_firmware_upgrade_start_transitions_to_wait_for_complete(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(
-        pool.clone(),
-        TestEnvOverrides {
-            config: Some(config_with_rack_profiles()),
-            ..Default::default()
-        },
-    )
-    .await;
-    let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
-    insert_default_rack_firmware(&pool, "fw-default", RackHardwareType::any(), true).await;
-    {
-        let mut txn = pool.begin().await?;
-        db::machine::update_rack_fw_details(
-            txn.as_mut(),
-            &host.host_snapshot.id,
-            Some(&model::rack::RackFirmwareUpgradeStatus {
-                task_id: "stale-rack-job".to_string(),
-                status: RackFirmwareUpgradeState::Completed,
-                started_at: Some(chrono::Utc::now() - chrono::Duration::minutes(10)),
-                ended_at: Some(chrono::Utc::now() - chrono::Duration::minutes(9)),
-            }),
-        )
-        .await?;
-        txn.commit().await?;
-    }
-    env.rms_sim
-        .queue_update_firmware_response(
-            librms::protos::rack_manager::UpdateFirmwareByDeviceListResponse {
-                response: Some(librms::protos::rack_manager::NodeBatchResponse {
-                    status: librms::protos::rack_manager::ReturnCode::Success as i32,
-                    message: "queued".to_string(),
-                    total_nodes: 1,
-                    successful_nodes: 1,
-                    failed_nodes: 0,
-                    job_id: "batch-job-1".to_string(),
-                    ..Default::default()
-                }),
-                node_jobs: vec![librms::protos::rack_manager::NodeFirmwareJobInfo {
-                    node_id: host.host_snapshot.id.to_string(),
-                    job_id: "child-job-1".to_string(),
+                        ),
+                    ),
                 }],
-            },
-        )
+            }),
+        }),
+    )
+    .await?;
+    env.rms_sim
+        .queue_apply_firmware_object_response(rms::ApplyFirmwareObjectResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                message: "accepted".to_string(),
+                total_nodes: 1,
+                successful_nodes: 1,
+                job_id: "parent-job".to_string(),
+                ..Default::default()
+            }),
+            object_id: "fw-json".to_string(),
+            node_jobs: vec![rms::NodeFirmwareJobInfo {
+                node_id: switch_id_string.clone(),
+                job_id: "child-job".to_string(),
+            }],
+        })
         .await;
 
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-
     let handler_instance = RackStateHandler::default();
     let mut services = env.rack_state_handler_services();
     let mut metrics = RackMetrics::default();
@@ -1494,67 +1394,40 @@ async fn test_firmware_upgrade_start_transitions_to_wait_for_complete(
         txn.commit().await?;
     }
 
-    match outcome {
-        StateHandlerOutcome::Transition { next_state, .. } => {
-            assert!(
-                matches!(
-                    next_state,
-                    RackState::Maintenance {
-                        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
-                            rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
-                        },
-                    }
-                ),
-                "FirmwareUpgrade(Start) should transition to WaitForComplete, got {:?}",
-                next_state
-            );
-        }
-        other => panic!(
-            "Expected Transition, got {:?}",
-            std::mem::discriminant(&other)
+    assert!(
+        matches!(
+            outcome,
+            StateHandlerOutcome::Transition {
+                next_state: RackState::Maintenance {
+                    maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                        rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+                    },
+                },
+                ..
+            }
         ),
-    }
-
-    let requests = env.rms_sim.submitted_firmware_requests().await;
+        "expected FirmwareUpgrade(WaitForComplete), got {:?}",
+        std::mem::discriminant(&outcome),
+    );
+    let requests = env
+        .rms_sim
+        .submitted_apply_firmware_object_from_json_requests()
+        .await;
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].activate);
+    assert_eq!(requests[0].config_json, r#"{"Id":"fw-json"}"#);
+    assert_eq!(requests[0].access_token, "token");
+    assert_eq!(requests[0].firmware_type, "prod");
+    assert!(requests[0].force_update);
     assert_eq!(requests[0].nodes.as_ref().unwrap().devices.len(), 1);
-    assert_eq!(
-        requests[0].nodes.as_ref().unwrap().devices[0].node_id,
-        host.host_snapshot.id.to_string()
-    );
 
-    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    let job = persisted_rack
-        .firmware_upgrade_job
-        .expect("rack firmware job should be persisted");
-    assert_eq!(job.batch_job_ids, vec!["batch-job-1".to_string()]);
-    assert_eq!(job.machines.len(), 1);
-    assert_eq!(job.machines[0].job_id.as_deref(), Some("child-job-1"));
-
-    let machine = db::machine::find_one(
-        &pool,
-        &host.host_snapshot.id,
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?
-    .expect("machine should exist");
-    assert!(machine.host_reprovision_requested.is_some());
-    assert!(
-        machine.rack_fw_details.is_none(),
-        "rack firmware details should be cleared at the start of a new rack firmware cycle"
-    );
-    assert!(
-        job.started_at.is_some_and(|started_at| {
-            started_at
-                >= machine
-                    .host_reprovision_requested
-                    .as_ref()
-                    .expect("rack reprovision request should exist")
-                    .requested_at
-        }),
-        "rack firmware job start time should be at or after the rack reprovision request"
-    );
+    let token_after = env
+        .test_credential_manager
+        .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
+            rack_id: rack_id.clone(),
+        })
+        .await
+        .expect("credential lookup should succeed");
+    assert!(token_after.is_none());
 
     Ok(())
 }
@@ -2095,7 +1968,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
 
 /// test_nvos_update_start_transitions_to_wait_for_complete verifies that
 /// Maintenance::NVOSUpdate(Start) transitions to WaitForComplete when a
-/// default NVOS-capable rack_firmware entry exists.
+/// NVOS SOT JSON is available for RMS ApplySwitchSystemImageFromJSON.
 #[crate::sqlx_test]
 async fn test_nvos_update_start_transitions_to_wait_for_complete(
     pool: sqlx::PgPool,
@@ -2118,7 +1991,7 @@ async fn test_nvos_update_start_transitions_to_wait_for_complete(
         maintenance_requested: Some(MaintenanceScope {
             switch_ids: vec![switch_id],
             activities: vec![MaintenanceActivity::NvosUpdate {
-                rack_firmware_id: Some("fw-nvos-default".to_string()),
+                config_json: r#"{"Id":"fw-nvos-default"}"#.to_string(),
             }],
             ..Default::default()
         }),
@@ -2128,10 +2001,23 @@ async fn test_nvos_update_start_transitions_to_wait_for_complete(
     db_rack::update(&mut txn, &rack_id, &config).await?;
     drop(txn);
 
-    create_default_nvos_rack_firmware(&pool, "fw-nvos-default").await;
+    env.api
+        .credential_manager
+        .set_credentials(
+            &CredentialKey::RackMaintenanceAccessToken {
+                rack_id: rack_id.clone(),
+            },
+            &Credentials::UsernamePassword {
+                username: "access_token".to_string(),
+                password: "token".to_string(),
+            },
+        )
+        .await
+        .map_err(|error| eyre::eyre!("failed to set maintenance access token: {}", error))?;
+
     env.rms_sim
-        .queue_update_switch_system_image_response(
-            librms::protos::rack_manager::UpdateSwitchSystemImageResponse {
+        .queue_apply_switch_system_image_response(
+            librms::protos::rack_manager::ApplySwitchSystemImageResponse {
                 response: Some(librms::protos::rack_manager::NodeBatchResponse {
                     status: librms::protos::rack_manager::ReturnCode::Success as i32,
                     job_id: "nvos-job-1".to_string(),
@@ -2156,9 +2042,7 @@ async fn test_nvos_update_start_transitions_to_wait_for_complete(
 
     let nvos_state = RackState::Maintenance {
         maintenance_state: RackMaintenanceState::NVOSUpdate {
-            nvos_update: NvosUpdateState::Start {
-                rack_firmware_id: Some("fw-nvos-default".to_string()),
-            },
+            nvos_update: NvosUpdateState::Start,
         },
     };
     let outcome = handler_instance
@@ -2169,13 +2053,16 @@ async fn test_nvos_update_start_transitions_to_wait_for_complete(
         rack.nvos_update_job.is_some(),
         "NVOSUpdate(Start) should populate rack.nvos_update_job"
     );
+    let requests = env
+        .rms_sim
+        .submitted_apply_switch_system_image_from_json_requests()
+        .await;
     assert!(
-        !env.rms_sim
-            .submitted_switch_system_image_requests()
-            .await
-            .is_empty(),
-        "NVOSUpdate(Start) should submit a switch system image request to RMS"
+        !requests.is_empty(),
+        "NVOSUpdate(Start) should submit ApplySwitchSystemImageFromJSON"
     );
+    assert_eq!(requests[0].config_json, r#"{"Id":"fw-nvos-default"}"#);
+    assert_eq!(requests[0].access_token, "token");
     let mut txn = pool.acquire().await?;
     let switch = db_switch::find_by_id(&mut txn, &switch_id)
         .await?

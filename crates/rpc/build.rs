@@ -701,11 +701,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "SkuStatus",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
-        .type_attribute("forge.RackFirmware", "#[derive(serde::Serialize)]")
-        .type_attribute("forge.RackFirmwareList", "#[derive(serde::Serialize)]")
-        .type_attribute("forge.RackFirmwareHistoryRecord", "#[derive(serde::Serialize)]")
-        .type_attribute("forge.RackFirmwareHistoryRecords", "#[derive(serde::Serialize)]")
-        .type_attribute("forge.RackFirmwareHistoryResponse", "#[derive(serde::Serialize)]")
         .type_attribute("common.RackHardwareType", "#[derive(serde::Serialize)]")
         .type_attribute("forge.RackCapabilitiesSet", "#[derive(serde::Serialize)]")
         .type_attribute("forge.RackCapabilityCompute", "#[derive(serde::Serialize)]")
