@@ -129,10 +129,12 @@ jobs:
         run: |
           TAGS=""
           PRIMARY_TAG=""
-          ARTIFACT_VERSION="${{ inputs.semantic_version }}-${{ inputs.short_sha }}"
+          # semantic_version comes from `git describe --long` and already ends in `-g<short_sha>`,
+          # so appending short_sha again would produce a duplicated SHA suffix.
+          ARTIFACT_VERSION="${{ inputs.semantic_version }}"
 
           if [ "${{ inputs.is_main_branch }}" == "true" ]; then
-            PRIMARY_TAG="${{ inputs.semantic_version }}-${{ inputs.short_sha }}"
+            PRIMARY_TAG="${{ inputs.semantic_version }}"
             TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}"
             TAGS="${TAGS},${{ inputs.target_registry }}/${{ inputs.service_name }}:latest"
           elif [ "${{ inputs.release_tag }}" != "" ]; then
@@ -259,6 +261,6 @@ jobs:
           display-name: ${{ inputs.service_name }}-image
           description: ${{ inputs.service_name }} image
           version: latest
-          path: artifacts/${{ inputs.service_name }}-${{ inputs.semantic_version }}-${{ inputs.short_sha }}.tar.gz
+          path: artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz
           ngc-path: ${{ inputs.ngc_path }}
           ngc-key: ${{ secrets.NVCR_TOKEN }}
