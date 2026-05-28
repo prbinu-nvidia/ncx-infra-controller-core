@@ -48,9 +48,8 @@ const UPSERT_TENANT_IDENTITY_CONFIG_SQL: &str = r#"
             token_ttl_sec, subject_prefix, enabled, created_at, updated_at,
             encrypted_signing_key_1, encrypted_signing_key_2,
             signing_key_public_1, signing_key_public_2,
-            current_signing_key_slot, non_active_slot_expires_at,
-            encryption_key_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, $9, $10, $11, $12, $13, $14)
+            current_signing_key_slot, non_active_slot_expires_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, $9, $10, $11, $12, $13)
         ON CONFLICT (organization_id) DO UPDATE SET
             issuer = EXCLUDED.issuer,
             default_audience = EXCLUDED.default_audience,
@@ -64,8 +63,7 @@ const UPSERT_TENANT_IDENTITY_CONFIG_SQL: &str = r#"
             signing_key_public_1 = EXCLUDED.signing_key_public_1,
             signing_key_public_2 = EXCLUDED.signing_key_public_2,
             current_signing_key_slot = EXCLUDED.current_signing_key_slot,
-            non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at,
-            encryption_key_id = EXCLUDED.encryption_key_id
+            non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
         RETURNING tenant_identity_config.*
     "#;
 
@@ -301,7 +299,6 @@ pub async fn set(
         .bind(key_rows.pub2)
         .bind(key_rows.current_slot)
         .bind(key_rows.non_active_expires_at)
-        .bind(&config.encryption_key_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(UPSERT_TENANT_IDENTITY_CONFIG_SQL, e))
@@ -522,7 +519,6 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         assert_eq!(cfg.token_ttl_sec, 3600);
         assert_eq!(cfg.subject_prefix, "spiffe://issuer.example.com/org-x");
         assert!(cfg.enabled);
-        assert_eq!(cfg.encryption_key_id.as_str(), "test-master");
         assert_eq!(
             cfg.current_signing_key_slot,
             TenantIdentityCurrentSigningKeySlot::SigningKey1
@@ -536,7 +532,6 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         assert_eq!(found.token_ttl_sec, cfg.token_ttl_sec);
         assert_eq!(found.subject_prefix, cfg.subject_prefix);
         assert_eq!(found.enabled, cfg.enabled);
-        assert_eq!(found.encryption_key_id, cfg.encryption_key_id);
         assert_eq!(found.current_signing_key_slot, cfg.current_signing_key_slot);
 
         let deleted = delete(&org_id, &mut txn).await.unwrap();

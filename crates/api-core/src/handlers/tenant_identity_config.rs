@@ -56,7 +56,6 @@ async fn tenant_identity_with_decrypted_token_delegation(
 ) -> Result<TenantIdentityConfigDecrypted, Status> {
     let auth_method_config = decrypt_token_delegation_encrypted_blob(
         credentials,
-        &cfg.encryption_key_id,
         cfg.encrypted_auth_method_config.as_ref(),
     )
     .await
@@ -465,8 +464,7 @@ pub(crate) async fn set_token_delegation(
     })?;
 
     let org_id_for_find = org_id.clone();
-    let id_row = api
-        .database_connection
+    api.database_connection
         .with_txn(|txn| {
             Box::pin(async move { tenant_identity_config::find(&org_id_for_find, txn).await })
         })
@@ -477,17 +475,16 @@ pub(crate) async fn set_token_delegation(
         })?;
 
     let (auth_method, plaintext_json) = config.to_db_format();
+    let encryption_key_id =
+        IdentityConfigValidationBounds::from(api.runtime_config.machine_identity.clone())
+            .encryption_key_id;
     let secret =
-        machine_identity_encryption_secret(&api.credential_manager, &id_row.encryption_key_id)
-            .await?;
-    let encrypted_blob: EncryptedTokenDelegationAuthConfig = key_encryption::encrypt(
-        plaintext_json.as_bytes(),
-        &secret,
-        &id_row.encryption_key_id,
-    )
-    .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?
-    .try_into()
-    .map_err(|e: InvalidNonEmptyStr| CarbideError::InvalidArgument(e.to_string()))?;
+        machine_identity_encryption_secret(&api.credential_manager, &encryption_key_id).await?;
+    let encrypted_blob: EncryptedTokenDelegationAuthConfig =
+        key_encryption::encrypt(plaintext_json.as_bytes(), &secret, &encryption_key_id)
+            .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?
+            .try_into()
+            .map_err(|e: InvalidNonEmptyStr| CarbideError::InvalidArgument(e.to_string()))?;
 
     let cfg = api
         .database_connection

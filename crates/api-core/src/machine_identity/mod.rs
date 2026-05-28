@@ -30,8 +30,8 @@ use std::fmt;
 
 use base64::Engine;
 pub(crate) use crypto::{
-    decrypt_token_delegation_encrypted_blob, machine_identity_encryption_secret,
-    token_delegation_credentials,
+    decrypt_machine_identity_ciphertext, decrypt_token_delegation_encrypted_blob,
+    machine_identity_encryption_secret, token_delegation_credentials,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use model::tenant::identity_config::TENANT_IDENTITY_SIGNING_JWT_ALG;

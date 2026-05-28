@@ -18,6 +18,9 @@
 //! Machine-identity encryption: Vault-backed AES keys for `tenant_identity_config` ciphertext
 //! (signing private key + token delegation auth JSON), and parsing of stored delegation
 //! `client_secret_basic` JSON for outbound token exchange.
+//!
+//! Decrypt uses the `key_id` embedded in each ciphertext envelope. Encrypt uses site
+//! `[machine_identity].current_encryption_key_id`.
 
 use forge_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use forge_secrets::key_encryption;
@@ -33,8 +36,15 @@ pub(crate) async fn machine_identity_encryption_secret(
     credentials: &dyn CredentialReader,
     encryption_key_id: &EncryptionKeyId,
 ) -> Result<key_encryption::Aes256Key, Status> {
+    machine_identity_encryption_secret_for_key_id(credentials, encryption_key_id.as_str()).await
+}
+
+async fn machine_identity_encryption_secret_for_key_id(
+    credentials: &dyn CredentialReader,
+    encryption_key_id: &str,
+) -> Result<key_encryption::Aes256Key, Status> {
     let cred_key = CredentialKey::MachineIdentityEncryptionKey {
-        key_id: encryption_key_id.as_str().to_string(),
+        key_id: encryption_key_id.to_string(),
     };
     let creds = credentials
         .get_credentials(&cred_key)
@@ -42,8 +52,7 @@ pub(crate) async fn machine_identity_encryption_secret(
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?
         .ok_or_else(|| {
             CarbideError::InvalidArgument(format!(
-                "encryption key '{}' not found in secrets (machine_identity.encryption_keys)",
-                encryption_key_id.as_str()
+                "encryption key '{encryption_key_id}' not found in secrets (machine_identity.encryption_keys)"
             ))
         })?;
     let stored = match &creds {
@@ -53,10 +62,25 @@ pub(crate) async fn machine_identity_encryption_secret(
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()).into())
 }
 
+/// Decrypts a machine-identity envelope using the `key_id` embedded in the blob.
+pub(crate) async fn decrypt_machine_identity_ciphertext(
+    credentials: &dyn CredentialReader,
+    encrypted_base64: &str,
+) -> Result<Vec<u8>, Status> {
+    let envelope_key_id = key_encryption::envelope_key_id(encrypted_base64).map_err(|e| {
+        CarbideError::internal(format!("stored ciphertext envelope is invalid: {e}"))
+    })?;
+    let aes = machine_identity_encryption_secret_for_key_id(credentials, &envelope_key_id).await?;
+    key_encryption::decrypt(encrypted_base64, &aes)
+        .map_err(|e| {
+            CarbideError::internal(format!("stored ciphertext could not be decrypted: {e}"))
+        })
+        .map_err(Into::into)
+}
+
 /// Decrypts `encrypted_auth_method_config` when set, otherwise `None`.
 pub(crate) async fn decrypt_token_delegation_encrypted_blob(
     credentials: &dyn CredentialReader,
-    encryption_key_id: &EncryptionKeyId,
     encrypted_auth_method_config: Option<&EncryptedTokenDelegationAuthConfig>,
 ) -> Result<Option<String>, Status> {
     let Some(enc) = encrypted_auth_method_config else {
@@ -65,12 +89,14 @@ pub(crate) async fn decrypt_token_delegation_encrypted_blob(
     if enc.as_str().is_empty() {
         return Ok(None);
     }
-    let aes = machine_identity_encryption_secret(credentials, encryption_key_id).await?;
-    let plain = key_encryption::decrypt(enc.as_str(), &aes).map_err(|e| {
-        CarbideError::internal(format!(
-            "stored token delegation configuration could not be decrypted: {e}"
-        ))
-    })?;
+    let plain = decrypt_machine_identity_ciphertext(credentials, enc.as_str())
+        .await
+        .map_err(|e| {
+            CarbideError::internal(format!(
+                "stored token delegation configuration could not be decrypted: {}",
+                e.message()
+            ))
+        })?;
     let utf8 = String::from_utf8(plain).map_err(|e| {
         CarbideError::internal(format!(
             "stored token delegation configuration plaintext was not valid UTF-8: {e}"
