@@ -71,7 +71,7 @@ async fn load_enabled_identity_for_well_known(
             let org_id = org_id.clone();
             Box::pin(async move {
                 tenant_identity_config::gc_expired_non_active_signing_key(&org_id, txn).await?;
-                tenant_identity_config::find(&org_id, txn).await
+                tenant_identity_config::find(&org_id, txn.as_mut()).await
             })
         })
         .await??;

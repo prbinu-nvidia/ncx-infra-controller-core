@@ -78,6 +78,36 @@ pub(crate) async fn decrypt_machine_identity_ciphertext(
         .map_err(Into::into)
 }
 
+/// Outcome of evaluating one encrypted blob for master-key re-wrap.
+pub(crate) enum ReencryptBlobOutcome {
+    SkippedOnTarget,
+    DryRunWouldReencrypt,
+    Reencrypted(String),
+}
+
+/// Re-wraps `ciphertext` when envelope `key_id` differs from `target_key_id`.
+pub(crate) async fn reencrypt_ciphertext_if_needed(
+    credentials: &dyn CredentialReader,
+    ciphertext: &str,
+    target_key_id: &EncryptionKeyId,
+    target_aes: &key_encryption::Aes256Key,
+    dry_run: bool,
+) -> Result<ReencryptBlobOutcome, Status> {
+    let current_key_id = key_encryption::envelope_key_id(ciphertext).map_err(|e| {
+        CarbideError::internal(format!("stored ciphertext envelope is invalid: {e}"))
+    })?;
+    if current_key_id == target_key_id.as_str() {
+        return Ok(ReencryptBlobOutcome::SkippedOnTarget);
+    }
+    let plaintext = decrypt_machine_identity_ciphertext(credentials, ciphertext).await?;
+    if dry_run {
+        return Ok(ReencryptBlobOutcome::DryRunWouldReencrypt);
+    }
+    let reencrypted = key_encryption::encrypt(&plaintext, target_aes, target_key_id.as_str())
+        .map_err(|e| CarbideError::internal(format!("failed to reencrypt ciphertext: {e}")))?;
+    Ok(ReencryptBlobOutcome::Reencrypted(reencrypted))
+}
+
 /// Decrypts `encrypted_auth_method_config` when set, otherwise `None`.
 pub(crate) async fn decrypt_token_delegation_encrypted_blob(
     credentials: &dyn CredentialReader,
@@ -135,7 +165,81 @@ pub(crate) fn token_delegation_credentials(
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use forge_secrets::credentials::{
+        CredentialKey, CredentialWriter, Credentials, TestCredentialManager,
+    };
+    use model::tenant::EncryptionKeyId;
+
     use super::*;
+
+    fn stored_secret(key_byte: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([key_byte; 32])
+    }
+
+    async fn test_credentials_with_keys(key_v1: &str, key_v2: &str) -> TestCredentialManager {
+        let credentials = TestCredentialManager::default();
+        for (key_id, byte) in [(key_v1, 1u8), (key_v2, 2u8)] {
+            credentials
+                .set_credentials(
+                    &CredentialKey::MachineIdentityEncryptionKey {
+                        key_id: key_id.to_string(),
+                    },
+                    &Credentials::UsernamePassword {
+                        username: String::new(),
+                        password: stored_secret(byte),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        credentials
+    }
+
+    #[tokio::test]
+    async fn reencrypt_ciphertext_if_needed_skips_on_target_and_rewraps() {
+        let key_v1 = "key-v1";
+        let key_v2 = "key-v2";
+        let credentials = test_credentials_with_keys(key_v1, key_v2).await;
+        let aes_v1 = key_encryption::aes256_key_from_stored_secret(&stored_secret(1)).unwrap();
+        let aes_v2 = key_encryption::aes256_key_from_stored_secret(&stored_secret(2)).unwrap();
+        let plaintext = b"tenant signing key material";
+        let ciphertext =
+            key_encryption::encrypt(plaintext, &aes_v1, key_v1).expect("encrypt test blob");
+
+        let target_v1: EncryptionKeyId = key_v1.parse().unwrap();
+        let target_v2: EncryptionKeyId = key_v2.parse().unwrap();
+
+        assert!(matches!(
+            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v1, &aes_v1, false,)
+                .await
+                .unwrap(),
+            ReencryptBlobOutcome::SkippedOnTarget
+        ));
+
+        assert!(matches!(
+            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v2, &aes_v2, true,)
+                .await
+                .unwrap(),
+            ReencryptBlobOutcome::DryRunWouldReencrypt
+        ));
+
+        let ReencryptBlobOutcome::Reencrypted(reencrypted) =
+            reencrypt_ciphertext_if_needed(&credentials, &ciphertext, &target_v2, &aes_v2, false)
+                .await
+                .unwrap()
+        else {
+            panic!("expected Reencrypted outcome");
+        };
+        assert_eq!(
+            key_encryption::envelope_key_id(&reencrypted).unwrap(),
+            key_v2
+        );
+        let decrypted = decrypt_machine_identity_ciphertext(&credentials, &reencrypted)
+            .await
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
 
     #[test]
     fn token_delegation_credentials_none_and_client_secret_basic() {

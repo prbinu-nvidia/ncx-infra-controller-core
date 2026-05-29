@@ -29,6 +29,7 @@ use model::tenant::{
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// After `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
@@ -276,13 +277,16 @@ pub async fn set(
     .map_err(|e| DatabaseError::query("UPSERT tenant_identity_config", e))
 }
 
-pub async fn find(
+pub async fn find<DB>(
     org_id: &TenantOrganizationId,
-    txn: &mut PgConnection,
-) -> DatabaseResult<Option<TenantIdentityConfig>> {
+    db: &mut DB,
+) -> DatabaseResult<Option<TenantIdentityConfig>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     sqlx::query_as("SELECT * FROM tenant_identity_config WHERE organization_id = $1")
         .bind(org_id.as_str())
-        .fetch_optional(txn)
+        .fetch_optional(&mut *db)
         .await
         .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY organization_id", e))
 }
@@ -382,6 +386,71 @@ pub async fn delete_token_delegation(
     .fetch_optional(txn)
     .await
     .map_err(|e| DatabaseError::query("CLEAR tenant_identity_config token_delegation", e))
+}
+
+/// Organization ids to re-wrap: one org (must exist) or all rows ordered by id.
+pub async fn list_organization_ids_for_reencrypt<DB>(
+    org_filter: Option<&TenantOrganizationId>,
+    db: &mut DB,
+) -> DatabaseResult<Vec<TenantOrganizationId>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    if let Some(org_id) = org_filter {
+        if find(org_id, &mut *db).await?.is_none() {
+            return Err(DatabaseError::NotFoundError {
+                kind: "tenant_identity_config",
+                id: org_id.as_str().to_string(),
+            });
+        }
+        return Ok(vec![org_id.clone()]);
+    }
+    sqlx::query_scalar::<_, TenantOrganizationId>(
+        "SELECT organization_id FROM tenant_identity_config ORDER BY organization_id",
+    )
+    .fetch_all(&mut *db)
+    .await
+    .map_err(|e| DatabaseError::query("LIST tenant_identity_config organization_ids", e))
+}
+
+/// Loads a row for update during master-key re-wrap.
+pub async fn find_for_update(
+    org_id: &TenantOrganizationId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<Option<TenantIdentityConfig>> {
+    sqlx::query_as("SELECT * FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE")
+        .bind(org_id.as_str())
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query("SELECT tenant_identity_config FOR UPDATE", e))
+}
+
+/// Updates encrypted signing-key and token-delegation ciphertext columns only.
+pub async fn update_encrypted_fields(
+    org_id: &TenantOrganizationId,
+    enc1: Option<EncryptedSigningPrivateKey>,
+    enc2: Option<EncryptedSigningPrivateKey>,
+    delegation: Option<EncryptedTokenDelegationAuthConfig>,
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE tenant_identity_config
+        SET encrypted_signing_key_1 = $2,
+            encrypted_signing_key_2 = $3,
+            encrypted_auth_method_config = $4,
+            updated_at = NOW()
+        WHERE organization_id = $1
+        "#,
+    )
+    .bind(org_id.as_str())
+    .bind(enc1)
+    .bind(enc2)
+    .bind(delegation)
+    .execute(txn)
+    .await
+    .map_err(|e| DatabaseError::query("UPDATE tenant_identity_config encrypted fields", e))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -522,7 +591,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         );
         assert!(cfg.signing_key_public_1.is_some());
 
-        let found = find(&org_id, &mut txn).await.unwrap().unwrap();
+        let found = find(&org_id, txn.as_mut()).await.unwrap().unwrap();
         assert_eq!(found.issuer, cfg.issuer);
         assert_eq!(found.default_audience, cfg.default_audience);
         assert_eq!(found.allowed_audiences.0, cfg.allowed_audiences.0);
@@ -534,7 +603,7 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
         let deleted = delete(&org_id, &mut txn).await.unwrap();
         assert!(deleted);
 
-        let not_found = find(&org_id, &mut txn).await.unwrap();
+        let not_found = find(&org_id, txn.as_mut()).await.unwrap();
         assert!(not_found.is_none());
     }
 
