@@ -683,43 +683,50 @@ enum SigningKeySlot {
     Key2,
 }
 
-async fn reencrypt_signing_key_field(
+async fn reencrypt_signing_key_fields(
     credentials: &dyn CredentialReader,
     org_id_str: &str,
-    slot: SigningKeySlot,
     plan: &mut ReencryptOrgPlan,
     target_key_id: &EncryptionKeyId,
     target_aes: &key_encryption::Aes256Key,
     dry_run: bool,
 ) -> Result<(), Status> {
-    let (field, ciphertext) = match slot {
-        SigningKeySlot::Key1 => (
-            "encrypted_signing_key_1",
-            plan.enc1.as_ref().map(|v| v.as_str()).map(str::to_string),
-        ),
-        SigningKeySlot::Key2 => (
-            "encrypted_signing_key_2",
-            plan.enc2.as_ref().map(|v| v.as_str()).map(str::to_string),
-        ),
-    };
-    if let Some(new_ciphertext) = tally_reencrypt_field(
-        plan,
-        reencrypt_one_field(
-            credentials,
-            org_id_str,
-            field,
-            ciphertext.as_deref(),
-            target_key_id,
-            target_aes,
-            dry_run,
-        )
-        .await?,
-    ) {
-        let slot = match slot {
-            SigningKeySlot::Key1 => &mut plan.enc1,
-            SigningKeySlot::Key2 => &mut plan.enc2,
+    for slot in [SigningKeySlot::Key1, SigningKeySlot::Key2] {
+        let (field, ciphertext) = match slot {
+            SigningKeySlot::Key1 => (
+                "encrypted_signing_key_1",
+                plan.enc1.as_ref().map(|v| v.as_str()).map(str::to_string),
+            ),
+            SigningKeySlot::Key2 => (
+                "encrypted_signing_key_2",
+                plan.enc2.as_ref().map(|v| v.as_str()).map(str::to_string),
+            ),
         };
-        store_reencrypted_signing_key(org_id_str, field, slot, &mut plan.failures, new_ciphertext);
+        if let Some(new_ciphertext) = tally_reencrypt_field(
+            plan,
+            reencrypt_one_field(
+                credentials,
+                org_id_str,
+                field,
+                ciphertext.as_deref(),
+                target_key_id,
+                target_aes,
+                dry_run,
+            )
+            .await?,
+        ) {
+            let enc_slot = match slot {
+                SigningKeySlot::Key1 => &mut plan.enc1,
+                SigningKeySlot::Key2 => &mut plan.enc2,
+            };
+            store_reencrypted_signing_key(
+                org_id_str,
+                field,
+                enc_slot,
+                &mut plan.failures,
+                new_ciphertext,
+            );
+        }
     }
     Ok(())
 }
@@ -743,20 +750,9 @@ async fn plan_org_reencrypt(
         failures: Vec::new(),
     };
 
-    reencrypt_signing_key_field(
+    reencrypt_signing_key_fields(
         credentials,
         org_id_str,
-        SigningKeySlot::Key1,
-        &mut plan,
-        target_key_id,
-        target_aes,
-        dry_run,
-    )
-    .await?;
-    reencrypt_signing_key_field(
-        credentials,
-        org_id_str,
-        SigningKeySlot::Key2,
         &mut plan,
         target_key_id,
         target_aes,
@@ -832,6 +828,7 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
         fields_skipped_on_target: 0,
         rows_failed: 0,
         failures: Vec::new(),
+        current_encryption_key_id: target_key_id.as_str().to_string(),
     };
 
     for org_id in org_ids {

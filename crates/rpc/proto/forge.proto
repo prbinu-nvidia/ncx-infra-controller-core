@@ -1115,6 +1115,8 @@ message ReencryptTenantIdentitySecretsResponse {
   uint32 fields_skipped_on_target = 5;
   uint32 rows_failed = 6;
   repeated ReencryptTenantIdentityFailure failures = 7;
+  // Site [machine_identity].current_encryption_key_id used as the re-wrap target.
+  string current_encryption_key_id = 8;
 }
 
 // Carried JWKS document for GetJWKS. Standard key fields live in `jwks` only (RFC 7517).

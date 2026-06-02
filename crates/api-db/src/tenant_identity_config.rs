@@ -32,6 +32,21 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+/// Explicit column list for [`TenantIdentityConfig`] queries. Avoid `SELECT *` so schema migrations
+/// (e.g. dropped columns) do not invalidate cached prepared statements on live connections.
+const TENANT_IDENTITY_CONFIG_COLUMNS: &str = "\
+    organization_id, issuer, default_audience, allowed_audiences, \
+    token_ttl_sec, subject_prefix, enabled, created_at, updated_at, \
+    encrypted_signing_key_1, encrypted_signing_key_2, \
+    signing_key_public_1, signing_key_public_2, \
+    current_signing_key_slot, non_active_slot_expires_at, \
+    token_endpoint, auth_method, encrypted_auth_method_config, \
+    subject_token_audience, token_delegation_created_at";
+
+fn tenant_identity_config_returning() -> String {
+    format!("RETURNING {TENANT_IDENTITY_CONFIG_COLUMNS}")
+}
+
 /// After `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
 pub async fn gc_expired_non_active_signing_key(
     org_id: &TenantOrganizationId,
@@ -233,7 +248,7 @@ pub async fn set(
         }
     };
 
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         r#"
         INSERT INTO tenant_identity_config (
             organization_id, issuer, default_audience, allowed_audiences,
@@ -256,9 +271,9 @@ pub async fn set(
             signing_key_public_2 = EXCLUDED.signing_key_public_2,
             current_signing_key_slot = EXCLUDED.current_signing_key_slot,
             non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
-        RETURNING tenant_identity_config.*
-        "#,
-    )
+        {}"#,
+        tenant_identity_config_returning(),
+    ))
     .bind(org_id.as_str())
     .bind(&config.issuer)
     .bind(&config.default_audience)
@@ -284,7 +299,10 @@ pub async fn find<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    sqlx::query_as("SELECT * FROM tenant_identity_config WHERE organization_id = $1")
+    let query = format!(
+        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1"
+    );
+    sqlx::query_as(&query)
         .bind(org_id.as_str())
         .fetch_optional(&mut *db)
         .await
@@ -299,7 +317,13 @@ pub async fn find_by_machine_id(
 ) -> DatabaseResult<TenantIdentityConfig> {
     let row = sqlx::query_as::<_, TenantIdentityConfig>(
         r"
-        SELECT tic.*
+        SELECT tic.organization_id, tic.issuer, tic.default_audience, tic.allowed_audiences,
+            tic.token_ttl_sec, tic.subject_prefix, tic.enabled, tic.created_at, tic.updated_at,
+            tic.encrypted_signing_key_1, tic.encrypted_signing_key_2,
+            tic.signing_key_public_1, tic.signing_key_public_2,
+            tic.current_signing_key_slot, tic.non_active_slot_expires_at,
+            tic.token_endpoint, tic.auth_method, tic.encrypted_auth_method_config,
+            tic.subject_token_audience, tic.token_delegation_created_at
         FROM tenant_identity_config tic
         INNER JOIN instances i ON tic.organization_id = i.tenant_org
         WHERE i.machine_id = $1 AND i.deleted IS NULL AND tic.enabled = true",
@@ -334,16 +358,16 @@ pub async fn set_token_delegation(
     encrypted_auth_method_config: &EncryptedTokenDelegationAuthConfig,
     txn: &mut PgConnection,
 ) -> DatabaseResult<TenantIdentityConfig> {
-    let row = sqlx::query_as(
+    let row = sqlx::query_as(&format!(
         r#"
         UPDATE tenant_identity_config
         SET token_endpoint = $2, auth_method = $3, encrypted_auth_method_config = $4,
             subject_token_audience = $5, updated_at = NOW(),
             token_delegation_created_at = COALESCE(token_delegation_created_at, NOW())
         WHERE organization_id = $1
-        RETURNING tenant_identity_config.*
-        "#,
-    )
+        {}"#,
+        tenant_identity_config_returning(),
+    ))
     .bind(org_id.as_str())
     .bind(&config.token_endpoint)
     .bind(auth_method)
@@ -373,15 +397,15 @@ pub async fn delete_token_delegation(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         r#"
         UPDATE tenant_identity_config
         SET token_endpoint = NULL, auth_method = NULL, encrypted_auth_method_config = NULL,
             subject_token_audience = NULL, token_delegation_created_at = NULL, updated_at = NOW()
         WHERE organization_id = $1
-        RETURNING tenant_identity_config.*
-        "#,
-    )
+        {}"#,
+        tenant_identity_config_returning(),
+    ))
     .bind(org_id.as_str())
     .fetch_optional(txn)
     .await
@@ -418,7 +442,10 @@ pub async fn find_for_update(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
-    sqlx::query_as("SELECT * FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE")
+    let query = format!(
+        "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE"
+    );
+    sqlx::query_as(&query)
         .bind(org_id.as_str())
         .fetch_optional(txn)
         .await
