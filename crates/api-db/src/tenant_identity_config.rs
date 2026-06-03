@@ -248,7 +248,7 @@ pub async fn set(
         }
     };
 
-    sqlx::query_as(&format!(
+    let query = format!(
         r#"
         INSERT INTO tenant_identity_config (
             organization_id, issuer, default_audience, allowed_audiences,
@@ -273,23 +273,24 @@ pub async fn set(
             non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
         {}"#,
         tenant_identity_config_returning(),
-    ))
-    .bind(org_id.as_str())
-    .bind(&config.issuer)
-    .bind(&config.default_audience)
-    .bind(Json(allowed))
-    .bind(token_ttl_i32)
-    .bind(&config.subject_prefix)
-    .bind(config.enabled)
-    .bind(key_rows.enc1)
-    .bind(key_rows.enc2)
-    .bind(key_rows.pub1)
-    .bind(key_rows.pub2)
-    .bind(key_rows.current_slot)
-    .bind(key_rows.non_active_expires_at)
-    .fetch_one(txn)
-    .await
-    .map_err(|e| DatabaseError::query("UPSERT tenant_identity_config", e))
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(org_id.as_str())
+        .bind(&config.issuer)
+        .bind(&config.default_audience)
+        .bind(Json(allowed))
+        .bind(token_ttl_i32)
+        .bind(&config.subject_prefix)
+        .bind(config.enabled)
+        .bind(key_rows.enc1)
+        .bind(key_rows.enc2)
+        .bind(key_rows.pub1)
+        .bind(key_rows.pub2)
+        .bind(key_rows.current_slot)
+        .bind(key_rows.non_active_expires_at)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query("UPSERT tenant_identity_config", e))
 }
 
 pub async fn find<DB>(
@@ -302,7 +303,7 @@ where
     let query = format!(
         "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1"
     );
-    sqlx::query_as(&query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
         .fetch_optional(&mut *db)
         .await
@@ -358,7 +359,7 @@ pub async fn set_token_delegation(
     encrypted_auth_method_config: &EncryptedTokenDelegationAuthConfig,
     txn: &mut PgConnection,
 ) -> DatabaseResult<TenantIdentityConfig> {
-    let row = sqlx::query_as(&format!(
+    let query = format!(
         r#"
         UPDATE tenant_identity_config
         SET token_endpoint = $2, auth_method = $3, encrypted_auth_method_config = $4,
@@ -367,15 +368,16 @@ pub async fn set_token_delegation(
         WHERE organization_id = $1
         {}"#,
         tenant_identity_config_returning(),
-    ))
-    .bind(org_id.as_str())
-    .bind(&config.token_endpoint)
-    .bind(auth_method)
-    .bind(encrypted_auth_method_config.as_str())
-    .bind(Some(config.subject_token_audience.as_str()))
-    .fetch_optional(txn)
-    .await
-    .map_err(|e| DatabaseError::query("UPDATE tenant_identity_config token_delegation", e))?;
+    );
+    let row = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(org_id.as_str())
+        .bind(&config.token_endpoint)
+        .bind(auth_method)
+        .bind(encrypted_auth_method_config.as_str())
+        .bind(Some(config.subject_token_audience.as_str()))
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query("UPDATE tenant_identity_config token_delegation", e))?;
     row.ok_or_else(|| DatabaseError::NotFoundError {
         kind: "tenant_identity_config",
         id: org_id.as_str().to_string(),
@@ -397,7 +399,7 @@ pub async fn delete_token_delegation(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<Option<TenantIdentityConfig>> {
-    sqlx::query_as(&format!(
+    let query = format!(
         r#"
         UPDATE tenant_identity_config
         SET token_endpoint = NULL, auth_method = NULL, encrypted_auth_method_config = NULL,
@@ -405,11 +407,12 @@ pub async fn delete_token_delegation(
         WHERE organization_id = $1
         {}"#,
         tenant_identity_config_returning(),
-    ))
-    .bind(org_id.as_str())
-    .fetch_optional(txn)
-    .await
-    .map_err(|e| DatabaseError::query("CLEAR tenant_identity_config token_delegation", e))
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(org_id.as_str())
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query("CLEAR tenant_identity_config token_delegation", e))
 }
 
 /// Organization ids to re-wrap: one org (must exist) or all rows ordered by id.
@@ -445,7 +448,7 @@ pub async fn find_for_update(
     let query = format!(
         "SELECT {TENANT_IDENTITY_CONFIG_COLUMNS} FROM tenant_identity_config WHERE organization_id = $1 FOR UPDATE"
     );
-    sqlx::query_as(&query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(org_id.as_str())
         .fetch_optional(txn)
         .await
