@@ -166,9 +166,8 @@ pub(crate) fn token_delegation_credentials(
 #[cfg(test)]
 mod tests {
     use base64::Engine;
-    use forge_secrets::credentials::{
-        CredentialKey, CredentialWriter, Credentials, TestCredentialManager,
-    };
+    use forge_secrets::credentials::{CredentialKey, CredentialWriter, Credentials};
+    use forge_secrets::test_support::credentials::TestCredentialManager;
     use model::tenant::EncryptionKeyId;
 
     use super::*;
