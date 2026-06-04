@@ -333,8 +333,7 @@ pub async fn find_by_machine_id(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> DatabaseResult<TenantIdentityConfig> {
-    let instance_machine_id =
-        instance_machine_id_for_identity_lookup(txn, machine_id).await?;
+    let instance_machine_id = instance_machine_id_for_identity_lookup(txn, machine_id).await?;
     let row = sqlx::query_as::<_, TenantIdentityConfig>(
         r"
         SELECT tic.organization_id, tic.issuer, tic.default_audience, tic.allowed_audiences,
