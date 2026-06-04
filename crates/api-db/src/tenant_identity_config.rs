@@ -348,7 +348,7 @@ pub async fn find_by_machine_id(
         INNER JOIN instances i ON tic.organization_id = i.tenant_org
         WHERE i.machine_id = $1 AND i.deleted IS NULL AND tic.enabled = true",
     )
-    .bind(&instance_machine_id)
+    .bind(instance_machine_id)
     .fetch_optional(&mut *txn)
     .await
     .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY machine_id", e))?;
