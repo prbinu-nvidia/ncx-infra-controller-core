@@ -159,12 +159,30 @@ Or use [jwt.io](https://jwt.io) in non-production environments only — do not p
 |---|---|
 | Discovery/JWKS 404 | Confirm org, site id, and REST routing; config must exist |
 | JWKS empty | Org config missing or disabled; check GET config |
-| IMDS 403/404/503/timeout | Agent logs, Core reachability from DPU, agent `sign-timeout-secs`; try [DPU-side debugging](#dpu-side-debugging-optional) |
+| IMDS 403/404/503/timeout | Agent logs, `sign-timeout-secs`, Core or sign-proxy reachability; see [DPU-side debugging](#dpu-side-debugging-optional) |
 | Valid JWT, verifier rejects | Clock skew, wrong JWKS URL, overlap ended for old `kid`, wrong `iss`/`aud` check |
 
 ### DPU-side debugging (optional)
 
-Use this only when IMDS fails and you need to isolate the DPU agent from Core signing. Requires shell access on the DPU and its machine certificate (`/opt/forge/machine_cert.pem`, paths may vary):
+When IMDS fails, check the DPU agent first: logs, `[machine-identity]` rate limits, and `sign-timeout-secs` ([Day 0](../getting-started/installation-options/day0-machine-identity.md#3-configure-dpu-agent-machine-identity-optional)).
+
+If the agent has **`sign-proxy-url`** set, IMDS forwards to that HTTP service instead of calling Core directly. Test the proxy from the DPU with the same request IMDS would send:
+
+```bash
+curl -sS -H 'Metadata: true' \
+  --cacert /etc/forge/sign_proxy_root.pem \
+  'https://sign-proxy.example.com/prefix/latest/meta-data/identity?aud=<allowed-audience>'
+```
+
+Use `--cacert` when `sign-proxy-tls-root-ca` is configured; omit it for `http:` URLs or when the proxy uses a public CA.
+
+### Reference: `SignMachineIdentity` gRPC (optional)
+
+This is **not** part of routine operator verification — IMDS (§4) is sufficient for end-to-end checks on the default path.
+
+Keep it as a **reference** if you operate a custom HTTP sign proxy (`sign-proxy-url`) whose implementation calls **`forge.Forge/SignMachineIdentity`** on the backend. Use it to validate the gRPC leg independently while developing or troubleshooting proxy code.
+
+From a host that holds the DPU machine certificate (`/opt/forge/machine_cert.pem`, paths may vary):
 
 ```bash
 grpcurl -insecure \
@@ -181,9 +199,7 @@ grpcurl -insecure \
 | Invalid audience | Audience not in `allowedAudiences` |
 | `UNAVAILABLE` | Site `[machine_identity]` disabled or broken global config |
 
-If gRPC succeeds but IMDS fails, focus on the DPU agent (rate limits, `sign-timeout-secs`, connectivity). If both fail with the same error class, check Day 0/Day 1 config.
-
-> **DPU vs host SPIFFE ID:** DPU certificates use the DPU machine id (`…d…`). NICo resolves DPU callers to the host instance record before loading tenant identity config.
+If this call succeeds but IMDS via your proxy fails, the issue is in the proxy HTTP layer (URL, TLS, headers, timeouts) — not Core signing.
 
 ---
 

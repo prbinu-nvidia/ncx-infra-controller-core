@@ -14,7 +14,7 @@ This guide assumes you have completed the [Quick Start Guide](../getting-started
 - At least one site registered and in `Registered` status, with machines discovered and available for allocation.
 - `nicocli` installed (`make nico-cli` from the infra-controller-rest repo) and reachable on `$PATH`.
 
-If you plan to enable **machine identity** (SPIFFE JWT-SVID issuance for tenant instances), complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist — see [Machine Identity](machine_identity.md).
+If you plan to enable SPIFFE JWT-SVID **machine identity**, complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist — see [Machine Identity](machine_identity.md).
 
 > **Note on CLI naming**: Older docs reference `carbidecli` (built via `make carbide-cli`). It's the same source under a previous name. This guide uses `nicocli` (built via `make nico-cli`) consistently.
 
