@@ -4,7 +4,7 @@ Operator guide for per-organization **machine identity** configuration: JWT-SVID
 
 This is a **Day 1 (Configuration)** activity. Complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) first — site secrets, `[machine_identity]` in site config, and a healthy `nico-api` with `enabled = true`.
 
-The primary management surface is the **NICo REST API** (`nico-rest-api`). Use `nicocli` (TUI or REST-backed commands where available), `curl`, or your automation against the endpoints below. `SignMachineIdentity` is called by DPUs over gRPC. A few admin-only RPCs (for example `GetTenantIdentityConfiguration`) are gRPC-only as well — use **`grpcurl`** with a Forge Admin CLI mTLS certificate; see [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates).
+The primary management surface is the **NICo REST API** (`nico-rest-api`). Use `nicocli` (TUI or REST-backed commands where available), `curl`, or your automation against the endpoints below.
 
 Design reference: [SPIFFE JWT-SVID SDD](../design/machine-identity/spiffe-svid-sdd.md).
 
@@ -94,7 +94,7 @@ nicocli tui
 
 The TUI prompts for issuer, audiences, TTL, optional `subjectPrefix`, and optional signing-key rotation.
 
-### Read and delete
+### Read and Delete
 
 ```bash
 # GET config + signing key metadata
@@ -118,7 +118,7 @@ When token delegation is configured, NICo issues a short-lived **intermediate** 
 
 **Endpoint:** `PUT /v2/org/{org}/nico/site/{siteID}/tenant-identity/token-delegation`
 
-> **Recommendation:** Token delegation causes `nico-api` to call the org-configured `tokenEndpoint` over HTTP(S). For external STS URLs, configure site-level egress controls in `[machine_identity]` during [Day 0](../getting-started/installation-options/day0-machine-identity.md):
+> **Recommendation:** Token delegation causes `nico-api` to call the org-configured `tokenEndpoint` over HTTP(S). For external token exchange URLs, configure site-level egress controls in `[machine_identity]` during [Day 0](../getting-started/installation-options/day0-machine-identity.md):
 >
 > - `token_endpoint_http_proxy` — route outbound token-exchange HTTP through a controlled egress proxy
 > - `token_endpoint_domain_allowlist` — restrict which hostnames tenants may register on `tokenEndpoint`
@@ -188,7 +188,7 @@ Requirements summary: `rotateKey: true`, `signingKeyOverlapSeconds` ≥ `tokenTt
 | `SignMachineIdentity` → invalid audience | Audience not in allowlist | Update `allowedAudiences` |
 | IMDS 403/404/503 | Agent limits, missing config, or signing failure | Check agent logs; verify Core reachable from DPU |
 | JWKS missing second key during rotation | Overlap expired or rotation not committed | Re-check GET config `signingKeys` |
-| Token delegation HTTP errors | STS unreachable, proxy misconfigured, allowlist block | Verify `token_endpoint_http_proxy` and domain allowlist; test STS from API network namespace |
+| Token delegation HTTP errors | Token exchange service unreachable, proxy misconfigured, allowlist block | Verify `token_endpoint_http_proxy` and domain allowlist; test token exchange service from API network namespace |
 
 ### Admin inspection (Core gRPC)
 
