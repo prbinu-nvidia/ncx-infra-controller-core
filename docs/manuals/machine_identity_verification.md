@@ -10,7 +10,7 @@ Use this after [Day 0](../getting-started/installation-options/day0-machine-iden
 
 - Site `[machine_identity].enabled = true` and valid encryption keys ([Day 0](../getting-started/installation-options/day0-machine-identity.md)).
 - Per-org `tenant-identity/config` exists with `enabled: true` ([Day 1](../configuration/machine_identity.md)).
-- At least one instance in `**READY**` assigned to the org under test.
+- At least one instance in **`READY`** assigned to the org under test.
 - Network access from a workload on that instance to `169.254.169.254` (IMDS).
 
 Collect `{org}`, `{site-id}`, and an allowed audience (for example `tenant-api`) from your identity config:
@@ -174,7 +174,7 @@ Or use [jwt.io](https://jwt.io) in non-production environments only — do not p
 
 When IMDS fails, check the DPU agent first: logs, `[machine-identity]` rate limits, and `sign-timeout-secs` ([Day 0](../getting-started/installation-options/day0-machine-identity.md#3-configure-dpu-agent-machine-identity-optional)).
 
-If the agent has `**sign-proxy-url**` set, IMDS forwards to that HTTP service instead of calling Core directly. Test the proxy from the DPU with the same request IMDS would send:
+If the agent has `sign-proxy-url` set, IMDS forwards to that HTTP service instead of calling Core directly. Test the proxy from the DPU with the same request IMDS would send:
 
 ```bash
 curl -sS -H 'Metadata: true' \
@@ -188,7 +188,7 @@ Use `--cacert` when `sign-proxy-tls-root-ca` is configured; omit it for `http:` 
 
 This is **not** part of routine operator verification — IMDS (§4) is sufficient for end-to-end checks on the default path.
 
-Keep it as a **reference** if you operate a custom HTTP sign proxy (`sign-proxy-url`) whose implementation calls `**forge.Forge/SignMachineIdentity`** on the backend. Use it to validate the gRPC leg independently while developing or troubleshooting proxy code.
+Keep it as a **reference** if you operate a custom HTTP sign proxy (`sign-proxy-url`) whose implementation calls `forge.Forge/SignMachineIdentity` on the backend. Use it to validate the gRPC leg independently while developing or troubleshooting proxy code.
 
 From a host that holds the DPU machine certificate (`/opt/forge/machine_cert.pem`, paths may vary):
 
@@ -204,7 +204,7 @@ grpcurl \
 
 | gRPC result                               | Likely cause                                                                   |
 | ----------------------------------------- | ------------------------------------------------------------------------------ |
-| `NotFound` / `machine_identity not found` | No org config, org disabled, instance not READY, or DPU not linked to instance |
+| `NotFound` / `machine_identity not found` | No org config, org disabled, instance not `READY`, or DPU not linked to instance |
 | Invalid audience                          | Audience not in `allowedAudiences`                                             |
 | `UNAVAILABLE`                             | Site `[machine_identity]` disabled or broken global config                     |
 
