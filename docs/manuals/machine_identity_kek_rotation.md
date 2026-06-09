@@ -86,20 +86,21 @@ Call **`ReencryptTenantIdentitySecrets`** with `dry_run: true`. Optionally scope
 
 ```bash
 grpcurl -cacert … -cert … -key … \
-  carbide-api.forge:443 forge.Forge/ReencryptTenantIdentitySecrets \
   -d '{
     "dry_run": true
-  }'
+  }' \
+  carbide-api.forge:443 forge.Forge/ReencryptTenantIdentitySecrets
 ```
 
 Single org:
 
 ```bash
-grpcurl … forge.Forge/ReencryptTenantIdentitySecrets \
+grpcurl -cacert … -cert … -key … \
   -d '{
     "organization_id": "<org>",
     "dry_run": true
-  }'
+  }' \
+  carbide-api.forge:443 forge.Forge/ReencryptTenantIdentitySecrets
 ```
 
 Inspect the response:
@@ -120,10 +121,11 @@ Inspect the response:
 Repeat with `dry_run: false`:
 
 ```bash
-grpcurl … forge.Forge/ReencryptTenantIdentitySecrets \
+grpcurl -cacert … -cert … -key … \
   -d '{
     "dry_run": false
-  }'
+  }' \
+  carbide-api.forge:443 forge.Forge/ReencryptTenantIdentitySecrets
 ```
 
 Verify:

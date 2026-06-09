@@ -2,7 +2,7 @@
 
 This guide is the Day 0 reference for enabling **machine identity** (SPIFFE JWT-SVID issuance) at the site level. It covers the secrets, site config, and DPU agent settings that must be in place before any tenant can configure per-org identity (a Day 1 activity).
 
-Machine identity lets tenant workloads on provisioned instances obtain short-lived JWT tokens that assert a SPIFFE ID. NICo signs those tokens when a DPU calls the Core gRPC API or when a workload reads the instance metadata service (IMDS). Per-org issuer, audiences, and TTL are configured later — see [Machine Identity (Day 1)](../configuration/machine_identity.md).
+Machine identity lets tenant workloads on provisioned instances obtain short-lived JWT tokens that assert a SPIFFE ID. NICo signs those tokens when a DPU calls the Core gRPC API or when a workload reads the instance metadata service (IMDS). Per-org issuer, audiences, and TTL are configured later — see [Machine Identity (Day 1)](../../configuration/machine_identity.md).
 
 The design and API details live in the [SPIFFE JWT-SVID SDD](../../design/machine-identity/spiffe-svid-sdd.md). This page focuses on what an operator configures once during initial site bring-up.
 
@@ -61,7 +61,7 @@ When using a local credential snapshot (development or file-based deployments), 
 
 In Vault deployments, store each key at a path that resolves to `machine_identity/encryption_keys/<key-id>` in the credential loader (for example `…/machine_identity/encryption_keys/kv1`). Follow the same secret-management process you use for other NICo site credentials.
 
-> **Important:** Keep all key ids that appear in stored ciphertext until you complete a KEK re-wrap. Decrypt always uses the `key_id` embedded in each encrypted blob, not the site’s current key id alone. See [Master Encryption Key Rotation (KEK)](../manuals/machine_identity_kek_rotation.md).
+> **Important:** Keep all key ids that appear in stored ciphertext until you complete a KEK re-wrap. Decrypt always uses the `key_id` embedded in each encrypted blob, not the site’s current key id alone. See [Master Encryption Key Rotation (KEK)](../../manuals/machine_identity_kek_rotation.md).
 
 ---
 
@@ -173,13 +173,13 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 Once Day 0 is complete and `enabled = true`, this endpoint returns **`404`** (no config yet) or **`200`** (after Day 1), not `503`.
 
-After Day 1 config and a READY instance, run the [Machine Identity Verification](../manuals/machine_identity_verification.md) runbook for gRPC and IMDS smoke tests.
+After Day 1 config and a READY instance, run the [Machine Identity Verification](../../manuals/machine_identity_verification.md) runbook for gRPC and IMDS smoke tests.
 
 ---
 
 ## Troubleshooting
 
-Day 0 verification uses API startup checks (§4.1) and the REST global gate (§4.2). Signing-path errors (`SignMachineIdentity`, IMDS) surface only after Day 1 and are covered in [Machine Identity Verification](../manuals/machine_identity_verification.md).
+Day 0 verification uses API startup checks (§4.1) and the REST global gate (§4.2). Signing-path errors (`SignMachineIdentity`, IMDS) surface only after Day 1 and are covered in [Machine Identity Verification](../../manuals/machine_identity_verification.md).
 
 | Symptom | Likely cause | Action |
 |---|---|---|
@@ -190,9 +190,9 @@ Day 0 verification uses API startup checks (§4.1) and the REST global gate (§4
 
 ## Next Steps
 
-- [Machine Identity (Day 1)](../configuration/machine_identity.md) — per-org issuer, audiences, token delegation, JWKS/OIDC verification
-- [Machine Identity Verification](../manuals/machine_identity_verification.md) — end-to-end checks after Day 1
-- [JWT Signing Key Rotation](../manuals/machine_identity_signing_key_rotation.md) — per-org signing key rotation
-- [Master Encryption Key Rotation (KEK)](../manuals/machine_identity_kek_rotation.md) — rotate site master keys safely
-- [Tenant Management](../configuration/tenant_management.md) — allocate instances before workloads need tokens
+- [Machine Identity (Day 1)](../../configuration/machine_identity.md) — per-org issuer, audiences, token delegation, JWKS/OIDC verification
+- [Machine Identity Verification](../../manuals/machine_identity_verification.md) — end-to-end checks after Day 1
+- [JWT Signing Key Rotation](../../manuals/machine_identity_signing_key_rotation.md) — per-org signing key rotation
+- [Master Encryption Key Rotation (KEK)](../../manuals/machine_identity_kek_rotation.md) — rotate site master keys safely
+- [Tenant Management](../../configuration/tenant_management.md) — allocate instances before workloads need tokens
 - [SPIFFE JWT-SVID SDD](../../design/machine-identity/spiffe-svid-sdd.md) — full design reference

@@ -134,10 +134,11 @@ curl -sS -X PUT \
   "https://<nico-rest>/v2/org/{org}/nico/site/{site-id}/tenant-identity/token-delegation" \
   -d '{
     "tokenEndpoint": "https://sts.example.com/oauth/token",
-    "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
     "subjectTokenAudience": "tenant-exchange",
-    "clientId": "nico-delegation",
-    "clientSecretBasic": "<secret>"
+    "clientSecretBasic": {
+      "clientId": "nico-delegation",
+      "clientSecret": "<secret>"
+    }
   }'
 ```
 
@@ -196,8 +197,8 @@ Site operators with a **Forge Admin CLI** mTLS certificate can inspect config wi
 
 ```bash
 grpcurl -cacert … -cert … -key … \
-  carbide-api.forge:443 forge.Forge/GetTenantIdentityConfiguration \
-  -d '{"organization_id": "<org>"}'
+  -d '{"organization_id": "<org>"}' \
+  carbide-api.forge:443 forge.Forge/GetTenantIdentityConfiguration
 ```
 
 Client cert setup: [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates).

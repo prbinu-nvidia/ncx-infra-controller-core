@@ -10,7 +10,7 @@ Use this after [Day 0](../getting-started/installation-options/day0-machine-iden
 
 - Site `[machine_identity].enabled = true` and valid encryption keys ([Day 0](../getting-started/installation-options/day0-machine-identity.md)).
 - Per-org `tenant-identity/config` exists with `enabled: true` ([Day 1](../configuration/machine_identity.md)).
-- At least one instance in **`READY`** assigned to the org under test.
+- At least one instance in `**READY**` assigned to the org under test.
 - Network access from a workload on that instance to `169.254.169.254` (IMDS).
 
 Collect `{org}`, `{site-id}`, and an allowed audience (for example `tenant-api`) from your identity config:
@@ -24,13 +24,15 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 ## Verification Checklist
 
-| Step | What it proves | Section |
-|---|---|---|
-| OIDC discovery | Issuer URL and JWKS URI are published | [§1](#1-oidc-discovery) |
-| JWKS / SPIFFE JWKS | Verifiers can fetch signing public keys | [§2](#2-jwks-endpoints) |
-| Config vs JWKS | Published keys match stored org config | [§3](#3-align-config-with-jwks) |
-| IMDS identity | End-to-end issuance for the instance | [§4](#4-imds-workload-path) |
-| JWT claims | Token content matches policy | [§5](#5-decode-and-validate-jwt-claims) |
+
+| Step               | What it proves                          | Section                                 |
+| ------------------ | --------------------------------------- | --------------------------------------- |
+| OIDC discovery     | Issuer URL and JWKS URI are published   | [§1](#1-oidc-discovery)                 |
+| JWKS / SPIFFE JWKS | Verifiers can fetch signing public keys | [§2](#2-jwks-endpoints)                 |
+| Config vs JWKS     | Published keys match stored org config  | [§3](#3-align-config-with-jwks)         |
+| IMDS identity      | End-to-end issuance for the instance    | [§4](#4-imds-workload-path)             |
+| JWT claims         | Token content matches policy            | [§5](#5-decode-and-validate-jwt-claims) |
+
 
 IMDS is the operator-facing check. The DPU agent calls Core gRPC `SignMachineIdentity` internally on that path — you do not need to invoke that RPC directly for routine verification. See [DPU-side debugging](#dpu-side-debugging-optional) when isolating agent vs Core failures.
 
@@ -85,11 +87,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   "https://<nico-rest>/v2/org/{org}/nico/site/{site-id}/tenant-identity/config" | jq '.signingKeys'
 ```
 
-| Config field | JWKS expectation |
-|---|---|
-| Entry with `currentSigner: true` | Must appear in JWKS |
-| Entry with `expireAt` set | Previous key; must still appear in JWKS until overlap expires |
-| Single entry, no `expireAt` | JWKS should contain one signing key |
+
+| Config field                     | JWKS expectation                                              |
+| -------------------------------- | ------------------------------------------------------------- |
+| Entry with `currentSigner: true` | Must appear in JWKS                                           |
+| Entry with `expireAt` set        | Previous key; must still appear in JWKS until overlap expires |
+| Single entry, no `expireAt`      | JWKS should contain one signing key                           |
+
 
 Mismatch between config and JWKS usually indicates a stale cache, incomplete rotation, or REST/Core sync delay — re-fetch after a short wait; if persistent, check Core logs and repeat GET/JWKS.
 
@@ -137,13 +141,15 @@ echo '<jwt>' | cut -d. -f2 | base64 -d 2>/dev/null | jq .
 
 Or use [jwt.io](https://jwt.io) in non-production environments only — do not paste production tokens into third-party sites.
 
-| Claim | Expected |
-|---|---|
-| `iss` | Matches configured `issuer` |
-| `sub` | SPIFFE ID under configured `subjectPrefix` + workload path |
-| `aud` | Contains requested audience; must be in org allowlist |
-| `exp` | Within `tokenTtlSeconds` of issuance |
-| `iat` / `nbf` | Reasonable skew relative to verifier clock |
+
+| Claim         | Expected                                                   |
+| ------------- | ---------------------------------------------------------- |
+| `iss`         | Matches configured `issuer`                                |
+| `sub`         | SPIFFE ID under configured `subjectPrefix` + workload path |
+| `aud`         | Contains requested audience; must be in org allowlist      |
+| `exp`         | Within `tokenTtlSeconds` of issuance                       |
+| `iat` / `nbf` | Reasonable skew relative to verifier clock                 |
+
 
 **Signature verification:** fetch JWKS (§2), locate the key by `kid` in the JWT header, verify ES256 signature with your JWT library or:
 
@@ -155,18 +161,20 @@ Or use [jwt.io](https://jwt.io) in non-production environments only — do not p
 
 ## Troubleshooting
 
-| Symptom | Action |
-|---|---|
-| Discovery/JWKS 404 | Confirm org, site id, and REST routing; config must exist |
-| JWKS empty | Org config missing or disabled; check GET config |
-| IMDS 403/404/503/timeout | Agent logs, `sign-timeout-secs`, Core or sign-proxy reachability; see [DPU-side debugging](#dpu-side-debugging-optional) |
-| Valid JWT, verifier rejects | Clock skew, wrong JWKS URL, overlap ended for old `kid`, wrong `iss`/`aud` check |
+
+| Symptom                     | Action                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Discovery/JWKS 404          | Confirm org, site id, and REST routing; config must exist                                                                |
+| JWKS empty                  | Org config missing or disabled; check GET config                                                                         |
+| IMDS 403/404/503/timeout    | Agent logs, `sign-timeout-secs`, Core or sign-proxy reachability; see [DPU-side debugging](#dpu-side-debugging-optional) |
+| Valid JWT, verifier rejects | Clock skew, wrong JWKS URL, overlap ended for old `kid`, wrong `iss`/`aud` check                                         |
+
 
 ### DPU-side debugging (optional)
 
 When IMDS fails, check the DPU agent first: logs, `[machine-identity]` rate limits, and `sign-timeout-secs` ([Day 0](../getting-started/installation-options/day0-machine-identity.md#3-configure-dpu-agent-machine-identity-optional)).
 
-If the agent has **`sign-proxy-url`** set, IMDS forwards to that HTTP service instead of calling Core directly. Test the proxy from the DPU with the same request IMDS would send:
+If the agent has `**sign-proxy-url**` set, IMDS forwards to that HTTP service instead of calling Core directly. Test the proxy from the DPU with the same request IMDS would send:
 
 ```bash
 curl -sS -H 'Metadata: true' \
@@ -180,12 +188,12 @@ Use `--cacert` when `sign-proxy-tls-root-ca` is configured; omit it for `http:` 
 
 This is **not** part of routine operator verification — IMDS (§4) is sufficient for end-to-end checks on the default path.
 
-Keep it as a **reference** if you operate a custom HTTP sign proxy (`sign-proxy-url`) whose implementation calls **`forge.Forge/SignMachineIdentity`** on the backend. Use it to validate the gRPC leg independently while developing or troubleshooting proxy code.
+Keep it as a **reference** if you operate a custom HTTP sign proxy (`sign-proxy-url`) whose implementation calls `**forge.Forge/SignMachineIdentity`** on the backend. Use it to validate the gRPC leg independently while developing or troubleshooting proxy code.
 
 From a host that holds the DPU machine certificate (`/opt/forge/machine_cert.pem`, paths may vary):
 
 ```bash
-grpcurl -insecure \
+grpcurl \
   -cacert /opt/forge/forge_root.pem \
   -cert /opt/forge/machine_cert.pem \
   -key /opt/forge/machine_cert.key \
@@ -193,11 +201,13 @@ grpcurl -insecure \
   carbide-api.forge:443 forge.Forge/SignMachineIdentity
 ```
 
-| gRPC result | Likely cause |
-|---|---|
+
+| gRPC result                               | Likely cause                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
 | `NotFound` / `machine_identity not found` | No org config, org disabled, instance not READY, or DPU not linked to instance |
-| Invalid audience | Audience not in `allowedAudiences` |
-| `UNAVAILABLE` | Site `[machine_identity]` disabled or broken global config |
+| Invalid audience                          | Audience not in `allowedAudiences`                                             |
+| `UNAVAILABLE`                             | Site `[machine_identity]` disabled or broken global config                     |
+
 
 If this call succeeds but IMDS via your proxy fails, the issue is in the proxy HTTP layer (URL, TLS, headers, timeouts) — not Core signing.
 
@@ -209,3 +219,4 @@ If this call succeeds but IMDS via your proxy fails, the issue is in the proxy H
 - [JWT Signing Key Rotation](machine_identity_signing_key_rotation.md) — rotate org signing keys and re-verify JWKS
 - [Master Encryption Key Rotation (KEK)](machine_identity_kek_rotation.md) — site master key (does not change JWKS)
 - [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) — site enablement
+
