@@ -13,6 +13,7 @@
 | 0.1     | 10/15/2026 | Binu Ramakrishnan | Initial version, scoped to issue 4613 only             |
 | 0.2     | 10/16/2026 | Binu Ramakrishnan | Rebased onto job-driven attestation, #7664             |
 | 0.3     | 10/16/2026 | Binu Ramakrishnan | Restructured around how each system works today        |
+| 0.4     | 10/20/2026 | Binu Ramakrishnan | Build the source from results and the current selection |
 
 ## 1 Purpose
 
@@ -83,7 +84,7 @@ This document covers the part of issue 4613 that can ship as one unit:
 - an `attestation` health-report source
 - one failure alert per failed attester, which blocks tenant allocation
 - coverage alerts where a profile applied but attestation covered less than it asked for, and no alert where no profile applied at all (§5.4)
-- storing the few scheduling facts needed to rebuild the source
+- storing the few scheduling facts the coverage alerts need
 
 A follow-up design handles the rest: typed failure reasons, the event-bus topic, the API snapshot, and the per-machine waiver. §7 lists both the gaps this leaves and the work that closes them.
 
@@ -98,7 +99,7 @@ A follow-up design handles the rest: typed failure reasons, the event-bus topic,
 | Scheduling     | The step that decides what to attest. It resolves the machine's hardware class, finds the profile for that class, matches the profile's selection against the attesters the BMC reports, and creates a job if any were selected. It always produces an outcome saying why it scheduled what it did (§5.4) |
 | Job            | One scheduling attempt. A job covers the attesters selected for one machine at one moment and carries its own ID |
 | Source         | The name a health report is stored under, such as `site-explorer` or `forge-dpu-agent`. A machine holds one report per source, and NICo merges them into the machine's overall health |
-| Failure alert  | `SpdmAttestationFailed`, raised once for each attester that failed attestation. It blocks tenant allocation (§5.2) |
+| Failure alert  | `SpdmAttestationFailed`, raised once for each selected attester that failed attestation. It blocks tenant allocation (§5.2) |
 | Coverage alert | `AttestationNoAttesters` or `AttestationPolicyUnsatisfied`, raised when attestation did not cover what the profile asked for. A machine carries at most one, and it does not block allocation (§5.2) |
 | Consumer       | The layer above NICo that applies the site's policy and calls NICo back, for example to quarantine a machine |
 | Waiver         | A future per-machine exception that would let an operator accept a failed attestation for one machine. It does not exist yet (§7) |
@@ -115,7 +116,7 @@ Two kinds of code read these alerts, and they do not apply the same test.
 
 **The Managed Hosts view, the admin CLI, the fleet healthy-count metric, and the republisher check only whether a machine has any alerts at all.** To all four, one alert of any kind makes a machine unhealthy. The republisher is the background job that re-sends each host's state to the event bus in case a consumer missed an update; it publishes unhealthy hosts on every sweep and healthy ones only as often as its configured scope allows, which may be never.
 
-So an alert deliberately left unclassified shows its machine as unhealthy to all four while still letting it be allocated. This design raises that kind of alert and changes none of these tests, so an uncovered machine looks unhealthy in all four and stays that way: §6 accepts it, and §5.4 limits it by raising no alert at all where no profile applied.
+So an alert deliberately left unclassified shows its machine as unhealthy to all four while still letting it be allocated. This design raises that kind of alert and changes none of these tests, so a machine with a coverage alert looks unhealthy in all four and stays that way. §6 accepts that, and §5.4 limits it by raising no alert at all where no profile applied.
 
 ## 4 How SPDM attestation works today
 
@@ -149,11 +150,13 @@ So a DPU is attested today whenever an operator asks for it, and reporting in th
 
 ## 5 Deriving health alerts from attestation
 
-The source is named `attestation`. It is what NICo claims about the machine right now, not a log of what each job did. Every write replaces all of its alerts at once. NICo builds the complete list from the stored scheduling decision (§5.3), the attesters' results, and the previous report, then stores that list over whatever was there before. It never adds or removes a single alert inside an existing report.
+The source is named `attestation`. It is what NICo claims about the machine right now, not a log of what each job did. Every update replaces all of its alerts at once. NICo builds the complete list from the coverage alert the stored decision calls for (§5.3), plus one failure alert for each selected attester whose newest finished result was `Failed`, and stores that list over whatever was there before. It never adds or removes a single alert inside an existing report.
 
-Each write is therefore self-contained. A writer builds the full list and stores it, so it never has to know which alerts the other writer (§5.1) left behind, and a write that lands twice produces the same report as one that lands once.
+A result is finished once it has passed, failed, or been cancelled. The selection comes from resolving the profile for the machine's hardware class and evaluating it against the attesters the machine has results for.
 
-Each write goes on the row of the machine being attested, so a DPU's alerts are stored on the DPU's own row. When the list comes out empty, the source is deleted rather than stored with no alerts in it.
+Each update is therefore self-contained. Each one builds the full list and stores it, so it never has to know which alerts the other (§5.1) left behind, and an update that lands twice produces the same report as one that lands once.
+
+Each update goes on the row of the machine being attested, so a DPU's alerts are stored on the DPU's own row. When the list comes out empty, the source is deleted rather than stored with no alerts in it.
 
 ```mermaid
 flowchart LR
@@ -188,27 +191,23 @@ flowchart LR
 
 The two arrows numbered 7 share a number because the aggregate feeds both at once. Everything in this diagram already exists except the health source itself: this phase adds the source and the alerts it writes, and the aggregate, the column, and the allocation gate all consume it with no changes of their own.
 
-### 5.1 Why two writers
+### 5.1 Why two places update it
 
-Two places write the source, because the two halves of what it reports become known at different moments.
+Two places update the source, because the two halves of what it reports become known at different moments.
 
-**Scheduling writes it, because the outcomes that most need reporting create no job.** `NoProfile`, `ClassNotRecorded`, `NoAttestersFound`, `PolicyMatchedNothing`, and `AttestationDisabled` all end immediately, with no job and no rows, so there is no later moment for them.
+**Scheduling updates it, because the outcomes that most need reporting create no job.** `NoProfile`, `ClassNotRecorded`, `NoAttestersFound`, `PolicyMatchedNothing`, and `AttestationDisabled` all end immediately, with no job and no rows, so there is no later moment for them.
 
-**The SPDM controller writes it as results arrive, because only then do results exist.** Every time a device in the job reaches `Passed`, `Failed`, or `Cancelled`, it rebuilds the source from that job's rows as they stand, so a failed attester is reported as soon as it fails rather than waiting on devices still running.
+**The SPDM controller updates it as results arrive, because only then do results exist.** Every time a device in the job reaches `Passed`, `Failed`, or `Cancelled`, it rebuilds the source, so a failed attester is reported as soon as it fails rather than waiting on devices still running.
 
-Either way, a write reports the newest known result for each attester the job selected, carrying forward the previous report's failure alert for one the job has not finished yet. A known failure therefore stays reported until a re-test passes that attester (§5.5).
+Both build the list the same way, using the rule in §5, so it does not matter which of them updated it last.
 
-**Two jobs can run at once.** Nothing stops an operator triggering attestation while a job is still running, and the second attempt creates a second job rather than disturbing the first. The stored decision (§5.3) keeps only the latest, so a result write reports only when that decision names its own job. The older job's results are therefore never reported: the operator has already replaced its decision with the newer one's, and pairing old results with a new decision would describe neither.
-
-An edited profile is the usual reason to trigger again, so the newer job often selects a different set of attesters, and per-attester scheduling ([#4488](https://github.com/dsx-ai-factory/infra-controller/issues/4488)) will make that routine. The reported set is always the current job's selection, so an attester the newer job does not select stops being reported, whether or not the older one found a failure on it (§5.5).
-
-A writer locks the machine row, then reads the decision and writes the source in one transaction. Both live on that row, so the check and the write become one step; without the lock, a newer decision could be stored between an older job's read and its write.
+An edited profile is the usual reason to trigger again, so the selection often changes, and per-attester scheduling ([#4488](https://github.com/dsx-ai-factory/infra-controller/issues/4488)) will make that routine. The report covers only the attesters the current profile selects, so one it no longer selects stops being reported, whether or not an earlier job found a failure on it (§5.5).
 
 ### 5.2 Alert IDs
 
 | Alert ID                       | Raised when                                         | Target                      | Classification       |
 | ------------------------------ | --------------------------------------------------- | --------------------------- | -------------------- |
-| `SpdmAttestationFailed`        | Each attester whose newest known result is `Failed` | Attester ID                 | `PreventAllocations` |
+| `SpdmAttestationFailed`        | Each selected attester whose newest finished result is `Failed` | Attester ID     | `PreventAllocations` |
 | `AttestationNoAttesters`       | `NoAttestersFound`                                  | Hardware class, if recorded | None                 |
 | `AttestationPolicyUnsatisfied` | `PartiallySatisfied` or `PolicyMatchedNothing`      | Hardware class, if recorded | None                 |
 
@@ -222,13 +221,13 @@ Messages explain the decision rather than repeat the alert ID. A coverage alert 
 
 ### 5.3 Storing what scheduling decided
 
-Scheduling works out the outcome, the hardware class, the profile version, whether the `any` profile supplied the policy, and which requirement went unsatisfied. It returns the first four to its caller, logs the fifth, and writes none of them down. The result writes need them to build a coverage alert, and an operator needs them to ask which machines are uncovered.
+Scheduling works out the outcome, the hardware class, the profile version, whether the `any` profile supplied the policy, and which requirement went unsatisfied. It returns the first four to its caller, logs the fifth, and writes none of them down. The result updates need them to build a coverage alert, and an operator needs them to ask which machines are uncovered.
 
-So scheduling stores them on the machine, in one nullable `jsonb` column rewritten in full on every run. Latest decision only, no history. A machine that has never been scheduled has `NULL`. The record also names the job it created, which the result writes check before reporting (§5.1).
+So scheduling stores them on the machine, in one nullable `jsonb` column rewritten in full on every run. Latest decision only, no history. A machine that has never been scheduled has `NULL`. The record also names the job it created.
 
 It is stored rather than worked out later, for two reasons. The outcome depends on which attesters the BMC reported at that moment, and that list is never kept. And `attestation_profiles` holds one row per hardware class with no history, so a later lookup returns whatever that profile says at the time of the lookup, not the revision that decided.
 
-It is stored on the machine rather than on the job because five of the seven outcomes in §5.4 create no job, and those five are the cases the coverage alerts describe.
+It is stored on the machine rather than on the job because five of the seven outcomes in §5.4 create no job, so for those there would be no job to attach it to.
 
 The migration is one statement, additive, and applies while a `nico-api` instance is still writing:
 
@@ -286,7 +285,7 @@ A machine whose class has no profile. It raises no alert (§5.4), so this record
 }
 ```
 
-Nothing else in this phase changes the schema. Health reports already live in `machines.health_reports`, which holds one report per source, so a new source is one more entry in it. The queries the writer needs already exist, keyed by job.
+Nothing else in this phase changes the schema. Health reports already live in `machines.health_reports`, which holds one report per source, so a new source is one more entry in it. The queries these updates need already exist, keyed by job.
 
 ### 5.4 Which alert each outcome raises
 
@@ -312,26 +311,24 @@ Uncovered machines are still findable: the stored decision (§5.3) records the o
 
 ### 5.5 Clearing alerts
 
-No alert is ever cleared on its own. Each write replaces the whole source (§5), so an alert goes away by not being in the next write.
+No alert is ever cleared on its own. Each update replaces the whole source (§5), so an alert goes away by not being in the next one.
 
-- **When scheduling creates the job**, the write holds the new decision's coverage alerts, plus the failure alerts the previous report held for attesters this job also selected. Scheduling a re-test does not clear a known failure, because nothing has yet shown it is fixed. Failure alerts for attesters this job does not select are the ones that go away here.
-- **On each device result**, the write holds those same coverage alerts, this job's failure alerts for the attesters it has finished, and the carried-forward ones for the attesters it has not. A passing result removes that attester's alert; a failing one replaces it.
+- **Starting a job clears nothing.** A job that has not yet finished an attester leaves that attester's newest finished result unchanged, so a failure stays reported while that attester is attested again.
+- **A profile change can clear an alert.** An attester the profile no longer selects drops out of the report at the next update, even though its failed result is still recorded.
 
-An attestation that creates no job writes once, at scheduling, since no result ever follows. It selects no attester, so it carries no failure alert forward either.
+An attestation that creates no job updates the report once, at scheduling, since no result ever follows. It selects no attester, so it reports no failure alert.
 
-So a failure alert clears when a re-test passes that attester, or when a profile stops selecting it. Not when an operator fixes the machine, and not merely because a re-test started.
+So a failure alert clears when that attester is attested again and passes, or when a profile stops selecting it. Not when an operator fixes the machine, and not merely because a new job started.
 
 **A missing alert does not mean the problem is fixed.** An operator can narrow an allowlist so NICo no longer attests a given attester. The next job does not select it, so its earlier failure disappears from the report even though nothing changed on the machine. That is intended, because NICo should not keep making claims about an attester it is not attesting. But a missing failure means "NICo is not claiming anything right now", not "the problem is fixed".
 
 ## 6 Decisions and consequences
 
-**Only failure alerts block allocation.** A failed attestation never established that the machine is safe to hand to a tenant, so NICo fails closed. A coverage alert reports a gap between the profile and the hardware rather than a bad result from a device, so the problem is in the profile or the inventory. Blocking on it would make a newly racked hardware class unallocatable over a configuration mistake.
+**Only failure alerts block allocation.** A failed attestation did not show that the machine is safe to hand to a tenant, so NICo refuses to allocate it. A coverage alert reports a gap between the profile and the hardware rather than a bad result from a device, so the problem is in the profile or the inventory. Blocking on it would make a newly racked hardware class unallocatable over a configuration mistake.
 
-The allocation gate is a backup today. A host that fails attestation already stops in `ManagedHostState::Failed`, so it never joins the pool at ingestion and never reaches cleanup at release. The gate only stops a machine that is already `Ready` from being picked. It becomes the primary hold if the Wait substate proposal in §7 lands.
+Blocking allocation rarely matters today. A host that fails attestation already stops in `ManagedHostState::Failed`, so it never joins the pool at ingestion and never reaches cleanup at release. The alert only stops a machine that is already `Ready` from being picked.
 
-**A coverage alert still shows as unhealthy.** Such a machine is neither healthy nor unhealthy: nothing found a bad device, and nothing verified it either. Health reports have no third value for that, so the alert reads as unhealthy to a person (§3) while the machine stays allocatable. Raising no alert for the two uncovered outcomes (§5.4) is what keeps this from reaching a whole fleet. One case remains: setting the `any` profile to `mode: ALL` gives every class a policy, so a device with no attesters of its own, such as a power shelf, ends at `NoAttestersFound` and raises an alert. The profile design already recommends the fix, which is `mode: NONE` for a class with nothing to attest.
-
-**Nothing here changes what counts as unhealthy.** The four places in §3 keep the test they apply today, so a coverage alert makes a machine unhealthy to all of them, including the republisher, which then re-sends that host on every sweep for as long as the alert lasts. That is wasted traffic, since the republished message carries only the host's state and a timestamp, and a coverage alert changes neither. Narrowing the republisher's test to classified alerts would fix the symptom, but it would give this system a second meaning of unhealthy and change behavior for every health source. §7 records it as a gap instead.
+**A coverage alert still shows as unhealthy.** Such a machine is neither healthy nor unhealthy: nothing found a bad device, and nothing verified it either. Health reports have no third value for that, so the alert reads as unhealthy to a person while the machine stays allocatable. Raising no alert where no profile applied (§5.4) is what keeps this from reaching a whole fleet.
 
 **Nothing happens until SPDM is on.** `spdm.enabled` defaults to `false` and gates every trigger point, so a site that has not enabled SPDM sees no new alerts and nothing stored. Everything above applies only to sites that have it on.
 
@@ -355,7 +352,7 @@ These are known gaps, listed so nobody expects more from the Health Alerts colum
 
 **Scheduling stays per machine.** #7664 makes attestation job driven, and a later change will let an operator schedule a single attester instead of the whole machine, tracked by [dsx-ai-factory/infra-controller#4488](https://github.com/dsx-ai-factory/infra-controller/issues/4488). Two things here assume one decision covers the machine: §5.3 stores a single decision per machine, and §5.2 allows at most one coverage alert on it. Both need revisiting when that change lands.
 
-**A review proposal would replace `Failed` with a Wait substate.** A failed attestation moves the host to a generic `ManagedHostState::Failed`, and a recovery handler reconstructs where to send it back by resolving the profile again and re-evaluating the selection. Design review proposed parking the host at the attestation point that failed instead, as `Trigger -> Poll -> (Wait if failed) -> next state`, so the return path needs no reconstruction. It is not tracked anywhere yet, and it was written against pre-job-driven attestation, so it needs revisiting against #7664. If it lands, the allocation gate becomes the primary hold rather than the backup (§6).
+**A review proposal would replace `Failed` with a Wait substate.** A failed attestation moves the host to a generic `ManagedHostState::Failed`, and a recovery handler reconstructs where to send it back by resolving the profile again and re-evaluating the selection. Design review proposed parking the host at the attestation point that failed instead, as `Trigger -> Poll -> (Wait if failed) -> next state`, so the return path needs no reconstruction. It is not tracked anywhere yet, and it was written against pre-job-driven attestation, so it needs revisiting against #7664.
 
 ## 8 Implementation
 
@@ -366,13 +363,13 @@ Six phases, each one commit.
 | 1   | `attestation_scheduling` column, the record type, its read and write helpers, and `trigger_attestation` populating it | `api-db` migration, `api-model`, `machine-controller` | #7664   |
 | 2   | `ATTESTATION_SOURCE`, the three alert IDs, and the alert constructors                                 | `health-report`                                       | —       |
 | 3   | `update_attestation_health_report`, and the builder that turns a stored decision into coverage alerts | `api-db`, `api-model`                                 | 2       |
-| 4   | Scheduling writes the coverage alerts and carries forward failure alerts for re-selected attesters    | `machine-controller`                                  | 1, 2, 3 |
-| 5   | The result write: row lock, job ownership check, coverage alerts, and failure alerts for finished and carried-forward attesters | `spdm-controller`                        | 1–4     |
+| 4   | Scheduling updates the report with the coverage alerts and the failure alerts for the selected attesters | `machine-controller`                                | 1, 2, 3 |
+| 5   | The result update, which rebuilds the same list each time a device finishes                           | `spdm-controller`                                     | 1–4     |
 | 6   | The three alert IDs in [`health_probe_ids.md`](../../architecture/health/health_probe_ids.md)         | documentation                                         | 2       |
 
 **Phase 1 is the only migration**, and it is additive with nothing reading the column yet, so it stands alone. It also moves `SchedulingOutcome` from `machine-controller` to `api-model`, because `spdm-controller` has to read the outcome back in phase 5 and both crates already depend on `api-model`. The enum derives `carbide_instrument::LabelValue` today and `api-model` does not depend on `carbide-instrument`, so the label stays behind in `machine-controller` as a newtype with a hand-written `LabelValue` impl. `UnsatisfiedRequirement` gains serde derives for the `unsatisfied` key (§5.3).
 
-**Phases 2 and 3 add library functions before their caller exists.** Both are library crates, so neither widens visibility for the sake of it. Phase 3 can be squashed into phase 4 if a reviewer would rather see the writer land with its caller.
+**Phases 2 and 3 add library functions before their caller exists.** Both are library crates, so neither widens visibility for the sake of it. Phase 3 can be squashed into phase 4 if a reviewer would rather see that function land with its caller.
 
 **Phase 4 covers both trigger paths at one call site.** The RPC and all three state-machine points go through `trigger_attestation`, so nothing separate is needed for the RPC.
 
@@ -385,16 +382,16 @@ Six phases, each one commit.
 | Each of the seven scheduling outcomes raises the alert §5.4 lists for it, including the four that raise none                         | `machine-controller` tests             |
 | With SPDM on and no profiles written, no machine carries an attestation alert                                                        | `api-core` integration test            |
 | Each failed attester gets its own `SpdmAttestationFailed` alert, targeted at that attester and carrying `PreventAllocations`         | `spdm-controller` tests                |
-| Each device result rebuilds the coverage alert from the stored decision and adds one failure alert per attester failed so far        | `spdm-controller` tests                |
+| Each device result rebuilds the whole list: the coverage alert from the stored decision, plus one failure alert per failed attester  | `spdm-controller` tests                |
 | A failed attester is reported while other devices in the job are still running                                                       | `spdm-controller` tests                |
 | A failed attester on a DPU stores its alert on the DPU's row and blocks allocation of the DPU's host                                 | `api-core` integration test            |
-| A machine with a failed older job and a passed newer job reports only the newer job                                                  | `spdm-controller` tests                |
-| Results from a job the stored decision no longer names write no alerts                                                               | `spdm-controller` tests                |
+| A machine with a failed older job and a passed newer job reports only the newer result                                               | `spdm-controller` tests                |
+| A result arriving from an older job while a newer one is running still produces the correct list                                     | `spdm-controller` tests                |
 | A coverage alert on a machine with no recorded hardware class has no target                                                          | `machine-controller` tests             |
 | An `AttestationPolicyUnsatisfied` message names the unsatisfied requirement, for both an allowlist pattern and a denylist that excluded everything | `machine-controller` tests |
 | Coverage alerts do not prevent allocation                                                                                            | `api-core` health aggregation tests    |
 | An attestation with no alerts to report deletes the source instead of storing an empty one                                           | `api-core` health aggregation tests    |
-| The trigger RPC writes the source just as a state-machine trigger does                                                               | `api-core` integration test            |
-| Scheduling a re-test keeps the previous failure alert for a re-selected attester, and drops it for one the new profile excludes     | `api-core` integration test            |
-| A carried-forward failure alert survives until the re-test produces a result for that attester, and clears only if it passes        | `spdm-controller` tests                |
+| The trigger RPC updates the source just as a state-machine trigger does                                                             | `api-core` integration test            |
+| Scheduling a new job keeps the failure alert for an attester it selects again, and drops it for one the new profile excludes        | `api-core` integration test            |
+| A failure alert survives while that attester is attested again, and clears only when the new result passes                          | `spdm-controller` tests                |
 | The `attestation` source merges with `site-explorer` and `forge-dpu-agent` without replacing either                                  | `api-core` health aggregation tests    |
