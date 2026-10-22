@@ -577,6 +577,65 @@ pub async fn list_single_machine_attestation_status(
     convert_status_str_to_model_status(status.as_str())
 }
 
+/// Returns the distinct devices a machine has attestation records for, ordered
+/// by device.
+///
+/// These stand in for the attesters the BMC reported, which is not stored, so a
+/// caller can apply a profile's selection to them.
+pub async fn list_device_ids_for_machine_id(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<Vec<String>, DatabaseError> {
+    let query = r#"
+        SELECT DISTINCT device_id
+        FROM spdm_machine_devices_attestation
+        WHERE machine_id = $1
+        ORDER BY device_id
+    "#;
+
+    sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Returns the newest finished attestation for each of a machine's devices, as
+/// `(device_id, state)` ordered by device.
+///
+/// A result is finished once it has passed, failed, or been cancelled. A device
+/// that is being attested again therefore keeps its previous finished result
+/// here, which [`list_single_machine_attestation_status`] does not: that
+/// aggregate ranks an unfinished device above a failed one, so a failure
+/// disappears from it while the device is re-attested.
+///
+/// A device whose attestations have all yet to finish is absent.
+pub async fn get_newest_finished_attestations_for_machine_id(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<Vec<(String, SpdmAttestationState)>, DatabaseError> {
+    let query = r#"
+        SELECT DISTINCT ON (device_id)
+            device_id,
+            state
+        FROM spdm_machine_devices_attestation
+        WHERE machine_id = $1
+            AND (state IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) OR state ? 'Failed')
+        ORDER BY device_id, started_at DESC, job_id DESC
+    "#;
+
+    let newest: Vec<(String, sqlx::types::Json<SpdmAttestationState>)> = sqlx::query_as(query)
+        .bind(machine_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(newest
+        .into_iter()
+        .map(|(device_id, state)| (device_id, state.0))
+        .collect())
+}
+
 /// Aggregates the device states for a job, returning not found if it has no devices.
 /// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
 pub async fn get_attestation_job_status(
@@ -1263,6 +1322,65 @@ mod tests {
                 "{scenario}"
             );
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn newest_finished_attestation_per_device_outlives_a_later_unfinished_attempt(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [9; 32],
+            MachineType::Host,
+        );
+        let mut txn = pool.begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+
+        let failed = SpdmAttestationState::Failed("bad measurement".to_string());
+        let now = chrono::Utc::now();
+        // The older attempt of each pair is the one an hour back.
+        let attempts = [
+            ("GPU_0", failed.clone(), 60),
+            ("GPU_0", SpdmAttestationState::FetchMetadata, 0),
+            ("GPU_1", failed.clone(), 60),
+            ("GPU_1", SpdmAttestationState::Passed, 0),
+            ("GPU_2", SpdmAttestationState::FetchMetadata, 0),
+            ("GPU_3", SpdmAttestationState::Cancelled, 0),
+        ];
+        for (device_id, state, minutes_ago) in attempts {
+            sqlx::query(
+                "INSERT INTO spdm_machine_devices_attestation \
+                 (machine_id, device_id, nonce, state, job_id, started_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(machine_id)
+            .bind(device_id)
+            .bind(uuid::Uuid::new_v4())
+            .bind(sqlx::types::Json(state))
+            .bind(uuid::Uuid::new_v4())
+            .bind(now - chrono::Duration::minutes(minutes_ago))
+            .execute(&mut *txn)
+            .await?;
+        }
+
+        let newest = get_newest_finished_attestations_for_machine_id(&mut txn, &machine_id).await?;
+
+        assert_eq!(
+            newest,
+            vec![
+                ("GPU_0".to_string(), failed),
+                ("GPU_1".to_string(), SpdmAttestationState::Passed),
+                ("GPU_3".to_string(), SpdmAttestationState::Cancelled),
+            ],
+            "a later unfinished attempt must not hide an earlier failure, a later \
+             pass must replace it, and a device with nothing finished must be absent"
+        );
+
+        txn.rollback().await?;
         Ok(())
     }
 }
